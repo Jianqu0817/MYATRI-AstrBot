@@ -16,10 +16,10 @@
     "vendor_binaries_committed": false
   },
   "MYATRI": {
-    "source": "vendor/myatri-0.1.7-py3-none-any.whl",
-    "version": "0.1.7",
+    "source": "vendor/myatri-0.1.8-py3-none-any.whl",
+    "version": "0.1.8",
     "private_library_copied": false,
-    "sha256": "d5b17a045eb459acd1e9fb7120bf16392b5d9816a19b943df43374e3110532de"
+    "sha256": "faf1ab9dff412dc2e46b57ff39dcc48069cc6cd7a4f0dd698782a40565052452"
   },
-  "persona_template_sha256": "d54159c63c4c0dfb8a5dcbc415389baf47b8f14d18d0612fb4c1ae8755c33eac"
+  "persona_template_sha256": "616bc2f202599f41b952b73895305f7d038906052e6f086c9055af06399aa21d"
 }
