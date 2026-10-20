@@ -1,0 +1,58 @@
+# 小温暖 AstrBot 桥接
+
+GitHub：[本项目](https://github.com/Jianqu0817/MYATRI-AstrBot) · [MYATRI主项目](https://github.com/Jianqu0817/MYATRI)。两个仓库均为私有，需登录有权限的GitHub账号访问。
+
+这是独立于原 MYATRI 私聊库的 AstrBot 接入项目。AstrBot 负责平台收发，本地 MYATRI 0.1.7 负责小温暖的人格、上下文、记忆和维护。已经提供可运行的本机后端、AstrBot 插件、一键入口及离线联调；微信真实群聊连接仍取决于选定的平台适配器。
+
+当前状态：**offline 模式、空群白名单、插件关闭**。没有登录微信、迁移私聊档案、调用付费模型或发送真实消息。
+
+## 使用
+
+1. 双击 `Start-Bridge.cmd`。默认启动 `http://127.0.0.1:8766` 的离线后端，并将插件放入独立 AstrBot 的插件目录。
+2. 双击 `Start-AstrBot.cmd`，打开 AstrBot 管理面板，默认地址 `http://localhost:6185`。面板首次启动可能需要准备前端资源。
+3. 选择并配置一个**实际支持微信群收发**的 AstrBot 平台适配器。它必须提供稳定的群ID、成员ID、消息ID；仅能识别昵称或只支持个人私聊的接口不够。
+4. 在 `config/bridge.local.toml` 将 `allowed_groups` 改成实际的 `平台实例ID|群ID`，例如 `allowed_groups = ["wechat-test|123@chatroom"]`，重启后端。
+5. 在 AstrBot 的“小温暖 MYATRI 桥接”插件设置中填相同白名单，确认 token 文件绝对路径，启用插件。**先保持后端 offline**，用测试群的@或 `/warm 内容` 验证收发。
+6. 收发验证后，再把后端配置 `mode = "live"` 并重启。模型凭据从现有 Windows 凭据读取；没有复制或保存你的模型 Key。在 AstrBot 中不需要再填一份 DeepSeek Key。
+
+专用于小温暖的 AstrBot 建议关闭内置 LLM 自动回复，即 `provider_settings.enable = false`。插件处理命中白名单的事件时也会停止后续流水线，避免双重调用。插件只处理群聊文字，暂不处理私聊、图片、语音或主动搭话。
+
+准备和离线检查：
+
+```powershell
+uv sync --frozen
+.venv/Scripts/python.exe scripts/prepare.py
+.venv/Scripts/python.exe -m pytest -q
+.venv/Scripts/python.exe -m ruff check src astrbot_plugin_myatri scripts tests
+```
+
+## 微信连接层说明
+
+AstrBot 平台框架与微信群协议是两个问题。当前官方个人微信适配使用腾讯 openclaw-weixin；官方仓库仍有未完成的普通群聊需求，不能把扫码私聊成功当成群聊接通。旧 Gewechat 或微信3.9补丁教程也不能直接作为当前可运行的证明。此项目没有自动下载或启用某个非官方微信协议服务。
+
+参考：[AstrBot](https://github.com/AstrBotDevs/AstrBot)、[个人微信适配说明](https://docs.astrbot.app/platform/weixin_oc.html)、[腾讯群聊需求](https://github.com/Tencent/openclaw-weixin/issues/327)。核对日期2026年10月21日。
+
+## 记忆与身份
+
+每个 `平台实例ID + 机器人ID + 群ID` 独立存档，同群成员共享群上下文。入站原话作为 JSON 信封中的 `text` 原样保留，并带成员ID、昵称、消息时间；昵称不是身份认证。当前身份与角色卡1.2保留，但不会复制原 `var/xiaowennuan` 的私聊、旧 ATRI 档案或私人记忆。用户原来的私聊库仍在原项目中，未被改动。
+
+群内不会自动把所有成员认作菅蘧，或把其他人的发言当成你的偏好。跨群记忆不互通；若以后要共享特定私人记忆，需要明确选择可分享的材料并添加可见范围。
+
+## 频率与送达状态
+
+继续使用正文40—80字目标、80字本地上限；诊断30轮、记忆与情绪50轮、深度整理150轮、人格审阅300轮；1M上下文配置、650k压缩阈值。所有桥接群共享一个50M日预算账本。原命令行私聊库的预算仍是另一个账本，并不构成账号总额限制。
+
+后端生成回复后标记 `prepared`；插件先原子领取为 `sending`，发送接口返回后记 `sent`。异常或发送中进程退出记 `unknown`，不会自动重发。`sent`仅表示适配器发送调用成功返回，不代表成员已读；若适配器本身不提供真实回执，无法证明服务端最终投递。生成记录不等于送达事实。
+
+## 项目组成
+
+- `upstream/AstrBot/`：实际克隆的上游4.29.1，commit锁定在 `UPSTREAM_LOCK.json`。
+- `vendor/`：已核对的 MYATRI 0.1.7 wheel，无私聊运行库及本机凭据；新项目无需依赖原项目的虚拟环境。
+- `astrbot_plugin_myatri/`：独立插件源码。
+- `src/myatri_bridge/`：本机HTTP后端、群隔离与投递状态。
+- `locks/astrbot.uv.lock`：AstrBot依赖锁；准备脚本复原并检查一致性。
+- `docs/MYATRI既有修改记录.md`：截至0.1.7的既有修改整理。
+- [Word版修改记录与接入说明](docs/MYATRI修改记录与AstrBot接入说明.docx)：3页摘要，已逐页检查排版。
+- `docs/接入设计与验收.md`：改动范围、限制、验证与尚需确认的信息。
+
+本机生成的 `var/bridge-token.txt` 仅用于桥接鉴权，不是模型Key。服务只监听127.0.0.1，不支持直接暴露公网；当前启动方式是同机部署。

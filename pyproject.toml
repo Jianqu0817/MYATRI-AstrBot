@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "myatri-astrbot-bridge"
+version = "0.1.0"
+description = "Isolated AstrBot group transport for MYATRI"
+requires-python = ">=3.12,<3.13"
+dependencies = ["myatri==0.1.7", "aiohttp>=3.11.18,<4", "httpx>=0.28,<1"]
+
+[project.scripts]
+myatri-bridge = "myatri_bridge.server:main"
+
+[tool.uv.sources]
+myatri = { path = "vendor/myatri-0.1.7-py3-none-any.whl" }
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.15,<0.16"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/myatri_bridge"]

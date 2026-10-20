@@ -1,0 +1,16 @@
+{
+  "AstrBot": {
+    "repository": "https://github.com/AstrBotDevs/AstrBot",
+    "commit": "f2404c191716a64daaa422be7f3c567cace50d39",
+    "version": "4.29.1",
+    "license": "AGPL-3.0-or-later",
+    "dependency_lock_sha256": "7f07eefa465d05d18b146ca53e250914da34612e17a51de8532719c1286a3fdb"
+  },
+  "MYATRI": {
+    "source": "vendor/myatri-0.1.7-py3-none-any.whl",
+    "version": "0.1.7",
+    "private_library_copied": false,
+    "sha256": "d5b17a045eb459acd1e9fb7120bf16392b5d9816a19b943df43374e3110532de"
+  },
+  "persona_template_sha256": "d54159c63c4c0dfb8a5dcbc415389baf47b8f14d18d0612fb4c1ae8755c33eac"
+}

@@ -1,0 +1,7 @@
+{
+  "enabled": {"description": "启用群聊桥接（默认关闭）", "type": "bool", "default": false},
+  "allowed_groups": {"description": "允许的 AstrBot平台实例ID|群ID", "type": "list", "default": []},
+  "bridge_url": {"description": "本机桥接服务地址", "type": "string", "default": "http://127.0.0.1:8766"},
+  "token_file": {"description": "桥接token文件绝对路径（不是模型API Key）", "type": "string", "default": "D:/DS_workspace/MYATRI-AstrBot/var/bridge-token.txt"},
+  "trigger_prefix": {"description": "除@外的显式触发前缀", "type": "string", "default": "/warm "}
+}

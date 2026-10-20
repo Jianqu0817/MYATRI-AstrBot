@@ -1,0 +1,13 @@
+[bridge]
+host = "127.0.0.1"
+port = 8766
+mode = "offline"
+allowed_groups = [] # Exact "AstrBot platform instance ID|group ID" pairs.
+cooldown_seconds = 8
+token_file = "var/bridge-token.txt"
+state_root = "var/groups"
+persona_file = "config/persona/persona.md"
+engine_config = "config/engine.toml"
+
+# Live mode is a later explicit choice; the model key stays in Windows credentials.
+# The plugin is disabled separately until a real group adapter has been selected.
