@@ -11,6 +11,9 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Plain
 from astrbot.api.star import Context, Star
 
+# Import registers the platform before AstrBot instantiates configured adapters.
+from . import wechatagent_platform  # noqa: F401
+
 
 class MyatriPlugin(Star):
     """Forward explicit group requests without invoking AstrBot's LLM pipeline."""

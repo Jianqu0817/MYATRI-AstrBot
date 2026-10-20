@@ -2,9 +2,17 @@
 
 GitHub：[本项目](https://github.com/Jianqu0817/MYATRI-AstrBot) · [MYATRI主项目](https://github.com/Jianqu0817/MYATRI)。两个仓库均为私有，需登录有权限的GitHub账号访问。
 
-这是独立于原 MYATRI 私聊库的 AstrBot 接入项目。AstrBot 负责平台收发，本地 MYATRI 0.1.7 负责小温暖的人格、上下文、记忆和维护。已经提供可运行的本机后端、AstrBot 插件、一键入口及离线联调；微信真实群聊连接仍取决于选定的平台适配器。
+## 当前微信接入（0.1.1）
 
-当前状态：**offline 模式、空群白名单、插件关闭**。没有登录微信、迁移私聊档案、调用付费模型或发送真实消息。
+已参考 [sourcepro5/WeChatAgent](https://github.com/sourcepro5/WeChatAgent) 增加实际的数据库读取/原生发送平台。配套微信 4.1.10.27 与相关运行组件已在本机独立准备，用户登录及真实群消息读取已验证；真实发送和付费回复尚未执行。
+
+本机日常使用 `Open-WeChat.cmd` 打开配套微信；已经登录时直接 `Start-WeChat.cmd`，沿用当前模式。首次交付为 offline。需要真实模型回复时使用 `Start-WeChat-Live.cmd`；密钥失效时先运行 `Setup-WeChat.cmd`。完整说明见 [WeChatAgent接入](docs/WeChatAgent接入.md)。运行环境、凭据和群设置不上传，GitHub 上的源码副本不能单独替代外部运行组件。
+
+以下为通用桥接说明与初始默认值；本机完成配置后的启用状态以私有配置为准。
+
+这是独立于原 MYATRI 私聊库的 AstrBot 接入项目。AstrBot 负责平台收发，本地 MYATRI 0.1.7 负责小温暖的人格、上下文、记忆和维护。通用桥接之外，0.1.1 增加了 WeChatAgent 平台及其本机准备入口。
+
+通用源码初始默认值：**offline 模式、空群白名单、插件关闭**。本机0.1.1已登录并绑定测试群，当前仍为offline；详情见上文。没有迁移私聊档案、调用付费模型或发送真实消息。
 
 ## 使用
 

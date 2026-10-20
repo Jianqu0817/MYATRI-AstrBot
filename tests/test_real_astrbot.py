@@ -39,7 +39,7 @@ async def test_pinned_astrbot_plugin_against_real_bridge(bridge, tmp_path):
         )
     with closing(sqlite3.connect(bridge.path)) as db:
         statuses = sorted(row[0] for row in db.execute("SELECT status FROM deliveries"))
-    assert statuses == ["sent", "unknown"]
+    assert statuses == ["sent", "sent", "unknown"]
     assert (
-        len(bridge.test_providers) == 1 and len(bridge.test_providers[0].requests) == 2
+        len(bridge.test_providers) == 1 and len(bridge.test_providers[0].requests) == 3
     )

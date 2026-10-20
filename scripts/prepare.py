@@ -54,9 +54,13 @@ def main():
         "metadata.yaml",
         "requirements.txt",
         "_conf_schema.json",
+        "wechatagent_client.py",
+        "wechatagent_platform.py",
     ]:
         shutil.copyfile(ROOT / "astrbot_plugin_myatri" / name, target / name)
-    print("Prepared offline bridge and disabled plugin. No WeChat login or model call.")
+    print(
+        "Plugin files prepared; existing mode and channel settings preserved. No login or model call."
+    )
 
 
 if __name__ == "__main__":

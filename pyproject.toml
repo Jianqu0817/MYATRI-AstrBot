@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "myatri-astrbot-bridge"
-version = "0.1.0"
+version = "0.1.1"
 description = "Isolated AstrBot group transport for MYATRI"
 requires-python = ">=3.12,<3.13"
 dependencies = ["myatri==0.1.7", "aiohttp>=3.11.18,<4", "httpx>=0.28,<1"]

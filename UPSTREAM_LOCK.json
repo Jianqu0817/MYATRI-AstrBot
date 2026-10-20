@@ -6,6 +6,15 @@
     "license": "AGPL-3.0-or-later",
     "dependency_lock_sha256": "7f07eefa465d05d18b146ca53e250914da34612e17a51de8532719c1286a3fdb"
   },
+  "WeChatAgentReference": {
+    "repository": "https://github.com/sourcepro5/WeChatAgent",
+    "commit": "0e76902a66c7bde6a3f78335284cea7f9be6e1b1",
+    "version": "0.3.9",
+    "installer_sha256": "acc17ad1927d3c65548ca781157b1751d673a8aead47af711dd4e90a5ecf06ce",
+    "native_sha256": "1f852ad09bfb8f04542cf4564933ef937326dcca1871a8f2c3cb9edd9b54f6bf",
+    "matched_wechat": "4.1.10.27",
+    "vendor_binaries_committed": false
+  },
   "MYATRI": {
     "source": "vendor/myatri-0.1.7-py3-none-any.whl",
     "version": "0.1.7",

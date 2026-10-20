@@ -5,6 +5,9 @@ import asyncio
 import importlib.util
 import json
 from pathlib import Path
+import sys
+import time
+from types import SimpleNamespace
 
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
@@ -15,6 +18,7 @@ from astrbot.core.star.star_handler import star_handlers_registry
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 
 class CapturedEvent(AstrMessageEvent):
@@ -53,7 +57,7 @@ def make_event(mid, *, mentioned=True, fail=False):
 
 async def run(args):
     spec = importlib.util.spec_from_file_location(
-        "myatri_plugin_under_test", ROOT / "astrbot_plugin_myatri/main.py"
+        "astrbot_plugin_myatri.main", ROOT / "astrbot_plugin_myatri/main.py"
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -82,6 +86,38 @@ async def run(args):
         await plugin.group_message(replay)
         assert not replay.sent
         assert any(h.handler_name == "group_message" for h in star_handlers_registry)
+        from astrbot_plugin_myatri.wechatagent_platform import WeChatAgentPlatform
+
+        captured_native = []
+
+        async def native_send(text):
+            captured_native.append(text)
+
+        platform = WeChatAgentPlatform({"id": "fixture"}, {}, asyncio.Queue())
+        platform.native = SimpleNamespace(
+            bot_id="bot",
+            group_id="room1",
+            settings=SimpleNamespace(bot_nickname="小溫暖"),
+            send=native_send,
+        )
+        native_payload = {
+            "event": "message.new",
+            "sessionType": "group",
+            "sessionId": "room1",
+            "talkerId": "wxid_group_member",
+            "rawid": "real-native-platform-1",
+            "type": 1,
+            "timestamp": int(time.time()),
+            "content": "/warm 今天想喝红茶。",
+            "sourceName": "同名群友",
+        }
+        native_event = platform.event(native_payload)
+        assert native_event.get_sender_id() == "wxid_group_member"
+        assert native_event.message_obj.timestamp == native_payload["timestamp"]
+        await plugin.group_message(native_event)
+        assert native_event.is_stopped() and len(captured_native) == 1
+        await plugin.group_message(platform.event(native_payload))
+        assert len(captured_native) == 1
         print(
             json.dumps(
                 {
@@ -90,6 +126,7 @@ async def run(args):
                     "duplicate_sends": len(duplicate.sent),
                     "unknown_not_resent": True,
                     "external_messages_sent": 0,
+                    "native_platform_captured_sends": len(captured_native),
                 }
             )
         )

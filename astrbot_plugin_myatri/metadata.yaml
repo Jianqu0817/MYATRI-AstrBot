@@ -1,6 +1,6 @@
 name: astrbot_plugin_myatri
 display_name: 小温暖 MYATRI 桥接
 desc: 将指定群聊交给本地 MYATRI，保留独立人格与群记忆。
-version: v0.1.0
+version: v0.1.1
 author: MYATRI
 astrbot_version: ">=4.29.1,<5"
