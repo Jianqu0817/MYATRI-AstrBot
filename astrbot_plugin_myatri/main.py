@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import httpx
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import At, Plain
+from astrbot.api.message_components import At, Plain, Reply
 from astrbot.api.star import Context, Star
 
 # Import registers the platform before AstrBot instantiates configured adapters.
@@ -16,7 +16,7 @@ from . import wechatagent_platform  # noqa: F401
 
 
 class MyatriPlugin(Star):
-    """Forward explicit group requests without invoking AstrBot's LLM pipeline."""
+    """Forward allowed group text for local trigger selection and recent context."""
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -77,7 +77,7 @@ class MyatriPlugin(Star):
         if prefix and text.startswith(prefix):
             mentioned = True
             text = text[len(prefix) :]
-        if not mentioned or not text.strip():
+        if not text.strip():
             return
         fingerprint = (
             event.get_platform_id(),
@@ -99,8 +99,20 @@ class MyatriPlugin(Star):
             "message_id": str(message_id),
             "sent_at": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
             "text": text,
-            "mentioned": True,
+            "mentioned": mentioned,
         }
+        components = event.get_messages()
+        reply = next((part for part in components if isinstance(part, Reply)), None)
+        if reply and reply.id:
+            payload["reply_to_id"] = str(reply.id)
+        mentioned_ids = [str(part.qq) for part in components if isinstance(part, At) and part.qq]
+        if mentioned_ids:
+            payload["mentioned_ids"] = list(dict.fromkeys(mentioned_ids))[:30]
+        raw = getattr(event.message_obj, "raw_message", None)
+        if event.get_platform_name() == "myatri_wechatagent" and isinstance(raw, dict):
+            if raw.get("_myatri_quote"):
+                payload["quoted_message"] = raw["_myatri_quote"]
+            payload["message_type"] = raw.get("_myatri_message_type", "text")
         self.inflight.add(fingerprint)
         delivery_id = None
         claimed = False

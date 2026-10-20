@@ -143,6 +143,8 @@ def test_unknown_identity_or_naive_time_is_rejected(message, change):
 
 async def test_cooldown_never_calls_model_for_second_message(bridge, message):
     bridge.config["cooldown_seconds"] = 3600
+    bridge.random_probability = 1
+    message = message.model_copy(update={"mentioned": False})
     await bridge.receive(message)
     assert (await bridge.receive(message.model_copy(update={"message_id": "fast"})))[
         "reason"

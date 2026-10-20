@@ -4,16 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "myatri-astrbot-bridge"
-version = "0.1.2"
+version = "0.2.0"
 description = "Isolated AstrBot group transport for MYATRI"
 requires-python = ">=3.12,<3.13"
-dependencies = ["myatri==0.1.8", "aiohttp>=3.11.18,<4", "httpx>=0.28,<1"]
+dependencies = ["myatri[neural]==0.2.0", "aiohttp>=3.11.18,<4", "httpx>=0.28,<1"]
 
 [project.scripts]
 myatri-bridge = "myatri_bridge.server:main"
 
 [tool.uv.sources]
-myatri = { path = "vendor/myatri-0.1.8-py3-none-any.whl" }
+myatri = { path = "vendor/myatri-0.2.0-py3-none-any.whl" }
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.15,<0.16"]

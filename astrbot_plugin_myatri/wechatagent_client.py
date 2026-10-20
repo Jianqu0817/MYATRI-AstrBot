@@ -272,10 +272,15 @@ def incoming(payload, client, started_at):
     stamp = payload.get("timestamp")
     sender = payload.get("talkerId")
     text = payload.get("content")
+    quote = payload.get("quoteReply")
+    quoted = (type(payload.get("type")) is int and payload["type"] in (49, (57 << 32) | 49)
+              and isinstance(quote, dict) and quote.get("version") == 1 and quote.get("truncated") is False
+              and isinstance(quote.get("reference"), dict) and isinstance(quote.get("reply"), str)
+              and quote["reply"] == text)
     if (
         payload.get("event") != "message.new"
         or type(payload.get("type")) is not int
-        or payload["type"] != 1
+        or (payload["type"] != 1 and not quoted)
         or payload.get("sessionType") != "group"
         or payload.get("sessionId") != client.group_id
         or payload.get("isSend", False) is not False
@@ -294,7 +299,7 @@ def incoming(payload, client, started_at):
     # This is an explicit textual wake token, not an authenticated WeChat At ID.
     nick = re.escape(client.settings.bot_nickname)
     mentioned = bool(re.search(r"@" + nick + r"(?=\u2005|\s|$)", text))
-    return {
+    result = {
         "sender_id": sender,
         "sender_name": str(payload.get("sourceName") or sender)[:160],
         "message_id": payload["rawid"],
@@ -302,3 +307,14 @@ def incoming(payload, client, started_at):
         "timestamp": stamp,
         "mentioned": mentioned,
     }
+    if quoted:
+        ref = quote["reference"]
+        if (ref.get("conversationId") == client.group_id and ref.get("kind") == "1"
+                and isinstance(ref.get("text"), str) and len(ref["text"]) <= 1600
+                and identifier(ref.get("senderId")) and ref.get("truncated") is False
+                and ref.get("unavailable") is False):
+            result["quoted_message"] = {"sender_id": ref["senderId"], "sender_name": str(ref.get("senderName", ""))[:160],
+                "server_message_id": str(ref.get("messageId", ""))[:160], "sent_at": str(ref.get("time", ""))[:80],
+                "text": ref["text"], "complete": True}
+        result["message_type"] = "quote"
+    return result

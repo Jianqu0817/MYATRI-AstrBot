@@ -5,7 +5,8 @@ allow_paid = false
 capabilities_verified = true
 
 [embedding]
-backend = "tfidf"
+backend = "auto" # Use the verified local BGE model when present; otherwise TF-IDF.
+path = "var/models/bge-small-zh-v1.5"
 # backend = "bge" 需 uv sync --extra neural 与显式下载模型
 # path = "var/models/bge-small-zh-v1.5"
 
@@ -24,6 +25,7 @@ reply_min_chars = 40
 reply_max_chars = 80
 reply_max_tokens = 512
 trace_every_turns = 30
+recall_budget_chars = 8000
 timezone = "Asia/Shanghai"
 
 limit = 1000000

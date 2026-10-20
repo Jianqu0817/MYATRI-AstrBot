@@ -58,6 +58,9 @@ def create_app(bridge, token):
             await bridge.receive(Incoming.model_validate(await request.json()))
         )
 
+    async def diagnostics(request):
+        return web.json_response(bridge.diagnostics())
+
     async def claim(request):
         return web.json_response(await bridge.claim(request.match_info["key"]))
 
@@ -70,16 +73,21 @@ def create_app(bridge, token):
     async def cleanup(app):
         await bridge.close()
 
+    async def startup(app):
+        bridge.start()
+
     app = web.Application(middlewares=[authenticate], client_max_size=65536)
     app.add_routes(
         [
             web.get("/health", health),
+            web.get("/v1/diagnostics", diagnostics),
             web.post("/v1/messages", messages),
             web.post("/v1/deliveries/{key}/claim", claim),
             web.post("/v1/deliveries/{key}/ack", acknowledge),
         ]
     )
     app.on_cleanup.append(cleanup)
+    app.on_startup.append(startup)
     return app
 
 

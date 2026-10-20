@@ -78,7 +78,8 @@ class WeChatAgentPlatform(Platform):
         message.message_str = item["text"]
         message.timestamp = item["timestamp"]
         # Preserve the original reader event locally; do not expose credentials.
-        message.raw_message = payload
+        message.raw_message = {**payload, "_myatri_quote": item.get("quoted_message"),
+                               "_myatri_message_type": item.get("message_type", "text")}
         event = WeChatAgentEvent(
             message.message_str, message, self.meta(), message.session_id
         )
