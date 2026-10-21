@@ -288,6 +288,19 @@ class ShortMemory:
                 "SELECT payload FROM listening_messages WHERE scope=? ORDER BY seq DESC LIMIT ?",
                 (scope, limit))][::-1]
 
+    def recent_assistant(self, scope, limit=None):
+        """Return the bot's own confirmed replies, oldest first.
+
+        This exists so a member quoting the bot can be matched back to the exact
+        reply it answered. These rows are never human evidence and never count
+        towards the listening window.
+        """
+        limit = 200 if limit is None else min(max(0, limit), 200)
+        with closing(self._connect()) as db:
+            return [json.loads(row[0]) for row in db.execute(
+                "SELECT payload FROM listening_assistant_context WHERE scope=? ORDER BY rowid DESC LIMIT ?",
+                (scope, limit))][::-1]
+
     def summaries(self, scope):
         with closing(self._connect()) as db:
             return [json.loads(row[0]) for row in db.execute(

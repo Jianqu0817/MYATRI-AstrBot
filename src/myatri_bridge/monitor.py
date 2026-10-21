@@ -83,6 +83,20 @@ def _context_view(value):
     return result
 
 
+def _latency_view(value):
+    if not isinstance(value, dict):
+        return None
+    result = {key: _number(value.get(key)) for key in (
+        "group_queue_seconds", "application_seconds", "lock_wait_seconds", "input_seconds",
+        "context_seconds", "model_seconds", "guard_seconds", "tool_seconds", "local_other_seconds",
+        "total_seconds", "generation_to_ready_seconds")}
+    preparation = value.get("context_preparation")
+    if isinstance(preparation, dict):
+        result["context_preparation"] = {key: _number(preparation.get(key))
+            for key in ("archive_view_seconds", "assembly_seconds", "total_seconds")}
+    return result
+
+
 def read_library(path, label, config, *, key):
     options = config.get("context", {})
     result = {"key": key, "label": label, "configured_context_limit": options.get("limit"),
@@ -119,6 +133,7 @@ def read_library(path, label, config, *, key):
                     result["last_conversation_completed_at"] = protocol["replied_at"]
                     result["last_turn_model_requests"] = protocol.get("steps")
                     result["context_composition"] = _context_view(protocol.get("context_stats"))
+                    result["last_turn_latency"] = _latency_view(protocol.get("latency"))
                     break
         prompt = (result["latest_conversation"] or {}).get("prompt_tokens")
         limit, threshold = options.get("limit"), options.get("compact_at")

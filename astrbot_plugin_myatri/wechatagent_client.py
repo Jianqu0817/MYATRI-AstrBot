@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import asyncio
 import json
+import logging
 from pathlib import Path
 import re
 import time
@@ -18,6 +19,8 @@ import httpx
 
 
 SUPPORTED_VERSION = "4.1.10.27"
+RECEIPT_CLOCK_SKEW_SECONDS = 10
+logger = logging.getLogger(__name__)
 
 
 class NotReady(RuntimeError):
@@ -244,11 +247,18 @@ class NativeClient:
                     and re.fullmatch(r"[1-9][0-9]*", str(row.get("localId", "")))
                     and str(row.get("localId")) not in before
                     and type(sent_at) in (int, float)
-                    and sent_at >= int(started)
+                    # WeChat's integer database timestamp can lag this process
+                    # by several seconds. New local ID + exact body + server ID
+                    # remain mandatory; never accept an old pre-send row.
+                    and int(started) - RECEIPT_CLOCK_SKEW_SECONDS <= sent_at
+                    <= time.time() + RECEIPT_CLOCK_SKEW_SECONDS
                     and row.get("fullText", row.get("content")) == text
                     and re.fullmatch(r"[0-9]{1,32}", server_id)
                     and int(server_id) > 0
                 ):
+                    if sent_at < int(started):
+                        logger.info("MYATRI receipt accepted with clock_backstep_seconds=%d",
+                                    int(started) - sent_at)
                     return
             if time.monotonic() >= deadline:
                 raise NotReady("SEND_RECEIPT_UNKNOWN")

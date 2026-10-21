@@ -2,18 +2,44 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 import time
 from urllib.parse import urlparse
 
 import httpx
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import At, Plain, Reply
 from astrbot.api.star import Context, Star
 
 # Import registers the platform before AstrBot instantiates configured adapters.
 from . import wechatagent_platform  # noqa: F401
+
+
+def group_scope(platform_id, bot_id, group_id):
+    """与桥接 ``Incoming.scope`` 完全一致的摘要。
+
+    桥接侧用 ``myatri.contracts.digest([...])[:32]``；这里在插件进程内复算同一套
+    规范化 JSON 与 SHA-256，避免两进程各算一套导致查不到待投递。
+
+    Args:
+        platform_id: AstrBot 平台实例 ID。
+        bot_id: 机器人自身 ID。
+        group_id: 群 ID。
+
+    Returns:
+        32 位小写十六进制的作用域摘要。
+    """
+    canonical = json.dumps(
+        [platform_id, bot_id, group_id],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()[:32]
 
 
 def delivery_error_code(error, stage):
@@ -43,6 +69,10 @@ class MyatriPlugin(Star):
         self.client = None
         self.inflight = set()
         self.delivery_locks = {}
+        self.proactive_task = None
+        # route -> {"scope": 32位摘要, "session": unified_msg_origin}
+        # 只从真实群事件学得，不猜平台内部结构；群内安静时本来也不该主动开口。
+        self.proactive_sessions = {}
 
     async def initialize(self):
         url = self.config.get("bridge_url", "http://127.0.0.1:8766").rstrip("/")
@@ -69,6 +99,100 @@ class MyatriPlugin(Star):
             trust_env=False,
             follow_redirects=False,
         )
+        # 主动发言默认关闭；只有显式打开才启动 10 秒轮询任务。
+        if self.config.get("proactive_enabled", False) and self.proactive_task is None:
+            self.proactive_task = asyncio.create_task(self._proactive_loop())
+
+    async def _proactive_loop(self):
+        """轮询桥接的待投递主动发言。
+
+        桥接只把 ``status='prepared'`` 的投递交给插件；claim/ack 语义与被动回复
+        完全一致，所以 ``unknown`` 一样不会被重投。
+        """
+        while True:
+            await asyncio.sleep(10)
+            for route, target in list(self.proactive_sessions.items()):
+                try:
+                    await self._deliver_pending(route, target)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # 只记录枚举诊断，不带任何消息内容。
+                    logger.warning(
+                        "MYATRI proactive poll stopped: %s",
+                        delivery_error_code(exc, "poll"),
+                    )
+
+    async def _deliver_pending(self, route, target):
+        """取出该 scope 的待投递并逐条 claim→发送→逐段 ack。"""
+        if self.client is None or self.context is None:
+            return
+        response = await self.client.get(
+            "/v1/deliveries/pending", params={"scope": target["scope"]}
+        )
+        response.raise_for_status()
+        deliveries = response.json().get("deliveries")
+        if not isinstance(deliveries, list):
+            raise ValueError("invalid pending response")
+        for delivery in deliveries[:3]:
+            if not isinstance(delivery, dict):
+                raise ValueError("invalid pending delivery")
+            delivery_id = delivery.get("id")
+            replies = delivery.get("reply_parts")
+            if (
+                not isinstance(delivery_id, str)
+                or not delivery_id
+                or not isinstance(replies, list)
+                or not 1 <= len(replies) <= 3
+                or any(not isinstance(text, str) or not text.strip() for text in replies)
+            ):
+                raise ValueError("invalid pending delivery")
+            async with self.delivery_locks.setdefault(route, asyncio.Lock()):
+                claim = await self.client.post(f"/v1/deliveries/{delivery_id}/claim")
+                claim.raise_for_status()
+                if not claim.json().get("claimed"):
+                    continue
+                await self._send_parts(delivery_id, replies, target["session"])
+
+    async def _send_parts(self, delivery_id, replies, session):
+        """按段发送并逐段 ack；任一段失败立刻记 ``unknown``，绝不重投。"""
+        part_started = None
+        stage = "send"
+        try:
+            for index, text in enumerate(replies):
+                part_started = time.monotonic()
+                stage = "send"
+                # 平台 send_by_session 只接受纯文本，并在 NativeClient.send 内做回执验证。
+                sent = await self.context.send_message(
+                    session, MessageChain([Plain(text)])
+                )
+                if not sent:
+                    raise RuntimeError("platform session not found")
+                elapsed = min(3600.0, time.monotonic() - part_started)
+                stage = "ack"
+                ack = await self.client.post(
+                    f"/v1/deliveries/{delivery_id}/ack",
+                    json={"status": "sent", "part_index": index, "elapsed_seconds": elapsed},
+                )
+                ack.raise_for_status()
+        except (Exception, asyncio.CancelledError) as exc:
+            reason = delivery_error_code(exc, stage)
+            logger.warning("MYATRI proactive delivery stopped: %s", reason)
+            try:
+                await self.client.post(
+                    f"/v1/deliveries/{delivery_id}/ack",
+                    json={
+                        "status": "unknown",
+                        "reason_code": reason,
+                        "elapsed_seconds": min(3600.0, time.monotonic() - part_started)
+                        if part_started is not None
+                        else None,
+                    },
+                )
+            except Exception:
+                pass
+            if isinstance(exc, asyncio.CancelledError):
+                raise
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10000)
     async def group_message(self, event: AstrMessageEvent):
@@ -88,6 +212,13 @@ class MyatriPlugin(Star):
         message_id = getattr(event.message_obj, "message_id", "")
         if not bot_id or not sender_id or not message_id or sender_id == bot_id:
             return
+        # 记住该群的会话与作用域，供主动发言轮询使用；没有群事件时不猜平台内部结构。
+        self.proactive_sessions[route] = {
+            "scope": group_scope(
+                event.get_platform_id(), str(bot_id), event.get_group_id()
+            ),
+            "session": event.unified_msg_origin,
+        }
         parts = event.get_messages()
         text = "".join(part.text for part in parts if isinstance(part, Plain))
         prefix = self.config.get("trigger_prefix", "/warm ")
@@ -185,5 +316,10 @@ class MyatriPlugin(Star):
             self.inflight.discard(fingerprint)
 
     async def terminate(self):
+        if self.proactive_task is not None:
+            # 干净取消：先请求取消，再等它退出，避免关闭时留下悬挂的 poll 请求。
+            self.proactive_task.cancel()
+            await asyncio.gather(self.proactive_task, return_exceptions=True)
+            self.proactive_task = None
         if self.client:
             await self.client.aclose()

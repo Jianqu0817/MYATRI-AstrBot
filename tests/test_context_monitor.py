@@ -4,7 +4,17 @@ import sqlite3
 from aiohttp.test_utils import TestClient, TestServer
 
 from myatri_bridge.monitor import create_monitor_app, read_library, snapshot
-from myatri_bridge.monitor import _context_view
+from myatri_bridge.monitor import _context_view, _latency_view
+
+
+def test_latency_projection_only_exports_finite_counters():
+    value = _latency_view({"context_seconds": 1.2, "model_seconds": float("nan"),
+        "guard_seconds": True, "text": "PRIVATE", "context_preparation": {
+            "assembly_seconds": .3, "extra": "PRIVATE"}})
+    assert value["context_seconds"] == 1.2
+    assert value["model_seconds"] is None and value["guard_seconds"] is None
+    assert value["context_preparation"]["assembly_seconds"] == .3
+    assert "PRIVATE" not in json.dumps(value)
 
 
 def library(tmp_path):

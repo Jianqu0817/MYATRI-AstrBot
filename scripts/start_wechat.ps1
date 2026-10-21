@@ -6,38 +6,21 @@ $env:PYTHONUTF8 = '1'
 $bridgeProcess = $null
 $readerProcess = $null
 $launcherOwned = $false
+. (Join-Path $PSScriptRoot 'wechat_services.ps1')
+$launcherStarted = (Get-Process -Id $PID).StartTime
 $launcherMutex = New-Object System.Threading.Mutex($false, ('Local\MYATRI-WeChat-' + ($projectDir -replace '[^A-Za-z0-9]', '_')))
 try {
     try { $launcherOwned = $launcherMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $launcherOwned = $true }
-    if (-not $launcherOwned) { throw 'The WeChat service launcher is already running. Use its existing window.' }
+    Stop-MyatriPreviousServices -ProjectDir $projectDir -StartedBefore $launcherStarted
+    if (-not $launcherOwned) {
+        try { $launcherOwned = $launcherMutex.WaitOne(8000) } catch [System.Threading.AbandonedMutexException] { $launcherOwned = $true }
+    }
+    if (-not $launcherOwned) { throw 'The previous launcher could not be replaced safely. Close its original window and retry.' }
     & uv sync --frozen
     if ($LASTEXITCODE -ne 0) { throw 'Bridge environment sync failed.' }
     & .\.venv\Scripts\python.exe scripts/prepare.py
     if ($LASTEXITCODE -ne 0) { throw 'Preparation failed.' }
     $workspace = Join-Path $projectDir 'var/wechatagent-runtime/workspace'
-    # Closing a CMD window can bypass finally and leave hidden children alive.
-    # Reap only our identified children, and only when AstrBot is not listening.
-    if (-not (Get-NetTCPConnection -State Listen -LocalPort 6185 -ErrorAction SilentlyContinue)) {
-        foreach ($orphanPort in @(5031,8766)) {
-            foreach ($listener in @(Get-NetTCPConnection -State Listen -LocalPort $orphanPort -ErrorAction SilentlyContinue)) {
-                $orphan = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $listener.OwningProcess)
-                $orphanParent = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $orphan.ParentProcessId)
-                $readerPath = Join-Path $workspace 'scripts/reader-api.py'
-                $bridgePython = Join-Path $projectDir '.venv/Scripts/python.exe'
-                $knownReader = $orphanPort -eq 5031 -and $orphan.CommandLine -and $orphan.CommandLine.Contains($readerPath) -and $orphan.ExecutablePath -and $orphan.ExecutablePath.StartsWith((Join-Path $projectDir 'var/wechatagent-runtime/'), [StringComparison]::OrdinalIgnoreCase)
-                $knownBridge = $orphanPort -eq 8766 -and $orphan.CommandLine -match '-m\s+myatri_bridge\.server(?:\s|$)' -and ($orphan.ExecutablePath -eq $bridgePython -or $orphanParent.ExecutablePath -eq $bridgePython)
-                if ($knownReader -or $knownBridge) {
-                    Write-Host ('Stopping the previous MYATRI child on port ' + $orphanPort + '.')
-                    $stopId = $orphan.ProcessId
-                    if ($knownBridge -and $orphanParent.ExecutablePath -eq $bridgePython) { $stopId = $orphanParent.ProcessId }
-                    & "$env:SystemRoot\System32\taskkill.exe" /PID $stopId /T /F | Out-Null
-                }
-            }
-        }
-    }
-    foreach ($servicePort in @(5031,6185,8766)) {
-        if (Get-NetTCPConnection -State Listen -LocalPort $servicePort -ErrorAction SilentlyContinue) { throw ('Close the previous service on port '+$servicePort+' before starting.') }
-    }
     $wechatSettings = & .\.venv\Scripts\python.exe -c "from astrbot_plugin_myatri.wechatagent_client import Settings; from urllib.parse import urlsplit; s=Settings.load('config/wechatagent.local.toml'); print(urlsplit(s.native_url).port or 80)"
     if ($LASTEXITCODE -ne 0) { throw 'WeChat settings could not be loaded. See docs/WeChatAgent接入.md.' }
     $nativePort = [int]$wechatSettings

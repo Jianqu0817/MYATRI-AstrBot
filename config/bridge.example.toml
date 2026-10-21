@@ -20,3 +20,31 @@ engine_config = "config/engine.toml"
 # Live mode is a later explicit choice; the model key stays in Windows credentials.
 # The plugin is disabled separately until a real group adapter has been selected.
 capture_requests = false
+
+# 联网搜索（默认关闭）。开启后每个群独立一个 web.sqlite3 作为缓存与日限额账本。
+# 经由 DeepSeek Harness 无头子进程：每次搜索任务可能包含多次计费请求，运行在只读沙箱内。
+[bridge.web]
+enabled = false
+backend = "dsh"
+node_path = "" # 必填：node.exe 绝对路径
+bin_path = "" # 必填：@deepseek-ai/dsh 的 lib/bin.js 绝对路径
+timeout_seconds = 25
+max_results = 3
+daily_limit = 40
+cache_ttl_hours = 24
+
+# 主动发言（默认关闭，且默认影子模式：只生成草稿、不发送）。
+# 主动轮不写 role="user" 记录，因此不会进入人类证据链。
+[bridge.proactive]
+enabled = false
+shadow_mode = true
+kill_switch_path = "var/KILL_PROACTIVE"
+active_start = "09:00"
+active_end = "23:30"
+min_interval_minutes = 20.0
+max_interval_minutes = 90.0
+speech_cooldown_minutes = 15.0
+daily_limit = 10
+group_silence_hours = 2.0
+budget_limit_ratio = 0.8
+candidate_ttl_seconds = 45.0

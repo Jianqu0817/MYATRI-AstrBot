@@ -30,6 +30,8 @@ async def test_thinking_http_tools_and_sent_history_survive_restart(tmp_path, me
                 "completion_tokens_details": {"reasoning_tokens": 500}}})
 
     config = load_config(PROJECT / "config/engine.toml")
+    # Explicit high remains supported; production chat now defaults to low.
+    config["chat"]["reasoning_effort"] = "high"
     settings = {"mode": "offline", "allowed_groups": [message.route], "cooldown_seconds": 0,
                 "random_reply_probability": 0, "quality_guard_enabled": False}
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:

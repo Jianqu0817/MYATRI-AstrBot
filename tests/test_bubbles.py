@@ -124,6 +124,10 @@ class Event:
     def stop_event(self):
         pass
 
+    @property
+    def unified_msg_origin(self):
+        return f"{self.message.platform_id}:GroupMessage:{self.message.group_id}"
+
     def get_platform_id(self):
         return self.message.platform_id
 
@@ -161,15 +165,18 @@ def plugin_callback():
     path = Path(__file__).resolve().parents[1] / "astrbot_plugin_myatri/main.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "delivery_error_code")
+    scope_helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "group_scope")
     cls = next(node for node in tree.body
                if isinstance(node, ast.ClassDef) and node.name == "MyatriPlugin")
     method = next(node for node in cls.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "group_message")
     method.decorator_list = []
+    import hashlib
     import time
-    namespace = {"asyncio": asyncio, "datetime": datetime, "timezone": timezone, "time": time, "httpx": httpx,
+    namespace = {"asyncio": asyncio, "datetime": datetime, "timezone": timezone, "time": time,
+                 "hashlib": hashlib, "json": json, "httpx": httpx,
                  "logger": logging.getLogger("bubbles-test"), "Plain": Plain, "At": At, "Reply": Reply,
                  "AstrMessageEvent": Event}
-    exec(compile(ast.Module(body=[helper, method], type_ignores=[]), str(path), "exec"), namespace)
+    exec(compile(ast.Module(body=[helper, scope_helper, method], type_ignores=[]), str(path), "exec"), namespace)
     return namespace["group_message"]
 
 
@@ -191,7 +198,8 @@ async def test_plugin_sends_in_order_and_stops_on_ambiguous_failure(bridge, mess
 
     async with httpx.AsyncClient(base_url="http://127.0.0.1", transport=httpx.MockTransport(handler)) as client:
         plugin = SimpleNamespace(config={"enabled": True, "allowed_groups": [message.route]},
-                                 client=client, inflight=set(), delivery_locks={})
+                                 client=client, inflight=set(), delivery_locks={},
+                                 proactive_sessions={})
         event = Event(message, fail_second=fail_second)
         callback = plugin_callback()
         await callback(plugin, event)

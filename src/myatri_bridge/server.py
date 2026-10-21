@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import hmac
 import json
 from pathlib import Path
+import sqlite3
 import tomllib
 
 from aiohttp import web
@@ -35,6 +36,40 @@ class DeliveryAck(BaseModel):
 class RuntimeControl(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     scope: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+class PendingQuery(BaseModel):
+    """``GET /v1/deliveries/pending`` 的查询参数，只允许 scope。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    scope: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+def pending_deliveries(path, scope, limit=5):
+    """只读查询该 scope 下 ``status='prepared'`` 的投递。
+
+    刻意使用只读连接，与 health 一致；这里绝不改动投递状态机，
+    claim 仍由 ``POST /v1/deliveries/{key}/claim`` 负责。
+    """
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=0.3)) as db:
+        db.execute("PRAGMA query_only=ON")
+        rows = db.execute(
+            "SELECT id,reply,reply_parts,sent_parts,trigger_kind FROM deliveries "
+            "WHERE scope=? AND status='prepared' ORDER BY rowid LIMIT ?",
+            (scope, limit),
+        ).fetchall()
+    result = []
+    for key, reply, reply_parts, sent_parts, trigger_kind in rows:
+        parts = json.loads(reply_parts) if reply_parts else ([reply] if reply else [])
+        result.append({
+            "id": key,
+            "reply_parts": parts,
+            "sent_parts": sent_parts,
+            "trigger_kind": trigger_kind,
+        })
+    return result
+
 
 
 def create_app(bridge, token):
@@ -80,6 +115,13 @@ def create_app(bridge, token):
     async def claim(request):
         return web.json_response(await bridge.claim(request.match_info["key"]))
 
+    async def pending(request):
+        # 参数校验与 RuntimeControl 同一风格：pydantic 严格模型 + 中间件统一 400。
+        query = PendingQuery.model_validate(dict(request.query))
+        return web.json_response(
+            {"scope": query.scope, "deliveries": pending_deliveries(bridge.path, query.scope)}
+        )
+
     async def acknowledge(request):
         body = DeliveryAck.model_validate(await request.json())
         return web.json_response(
@@ -114,6 +156,7 @@ def create_app(bridge, token):
             web.post("/v1/admin/clear-context", clear_runtime_context),
             web.post("/v1/admin/retry-summaries", retry_summaries),
             web.post("/v1/messages", messages),
+            web.get("/v1/deliveries/pending", pending),
             web.post("/v1/deliveries/{key}/claim", claim),
             web.post("/v1/deliveries/{key}/ack", acknowledge),
         ]

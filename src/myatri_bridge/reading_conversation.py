@@ -5,7 +5,10 @@ lightweight audits. Keep retry/idempotency/budget/checkpoint semantics aligned
 when updating that dependency. No changes to site-packages or the core checkout.
 """
 from copy import deepcopy
+import inspect
 import json
+import logging
+import time
 
 import jsonschema
 
@@ -16,6 +19,8 @@ from myatri.providers.gateway import ProviderError, assistant_message, validate_
 from .tool_reading import (READING_RULES, FIELDS, cold_page, guard_reading_claim, read_audit,
                            read_page, recall_directory)
 from .bubbles import prepare_bubbles
+
+logger = logging.getLogger(__name__)
 
 
 READING_TOOLS = deepcopy(TOOLS)
@@ -52,7 +57,11 @@ class ReadingConversation(Conversation):
         return adapted
 
     async def respond(self, text, *, message_id=None, metadata=None):
+        started = time.perf_counter()
         async with self._lock:
+            acquired = time.perf_counter()
+            timings = {"lock_wait_seconds": acquired-started, "model_seconds": 0.,
+                       "guard_seconds": 0., "tool_seconds": 0.}
             if metadata is not None and not isinstance(metadata, dict):
                 raise ValueError("message metadata must be a dict")
             if metadata and set(metadata) & {"role", "content", "message_id"}:
@@ -73,6 +82,8 @@ class ReadingConversation(Conversation):
             completed = sum(1 for r in self.store.list_records("raw_message")
                             if r.payload.get("role") == "assistant" and r.payload.get("reply_to"))
             checkpoint = (completed + 1) % self.context.trace_every_turns == 0
+            timings["input_seconds"] = time.perf_counter()-acquired
+            context_started = time.perf_counter()
             saved = self.protocol_store.get_protocol(raw.record_id) if self.protocol_store else None
             if saved and saved["status"] == "context_reset":
                 raise ProviderError("turn belongs to a cleared context; use a new message ID")
@@ -84,8 +95,15 @@ class ReadingConversation(Conversation):
                 messages, snapshot = await self.context.abuild_context(text, tools=tools, persist_activation=checkpoint)
                 turn_stats = deepcopy(self.context.explain_context().get("context_stats", {}))
                 start_step = 0
-            if not any(m.get("role") == "system" and m.get("content") == READING_RULES for m in messages):
-                messages.insert(0, {"role": "system", "content": READING_RULES})
+            timings["context_seconds"] = time.perf_counter()-context_started
+            preparation = self.context.explain_context().get("preparation_timings", {})
+            rules = READING_RULES
+            if "web_search" in self.tool_handlers:
+                from .web_tools import WEB_SEARCH_RULES
+                # The tool description covers "how"; this rule covers "when".
+                rules = rules + "\n" + WEB_SEARCH_RULES
+            if not any(m.get("role") == "system" and m.get("content") == rules for m in messages):
+                messages.insert(0, {"role": "system", "content": rules})
             for step in range(start_step, self.max_steps):
                 reply_policy = self.context.reply_policy
                 output_tokens = self.context.budget.output_reserve
@@ -99,13 +117,17 @@ class ReadingConversation(Conversation):
                                        timeout=self.thinking_timeout if self.thinking else 45,
                                        estimated_input_tokens=self.context.budget.estimate(messages, tools))
                 self.context.budget.require(messages, tools)
+                model_started = time.perf_counter()
                 response = await self.gateway.generate(request)
+                timings["model_seconds"] += time.perf_counter()-model_started
                 self.context.budget.calibrate(messages, response.usage, tools)
                 if self.protocol_store and checkpoint:
                     self.protocol_store.set_meta("context_token_anchor", self.context.budget.anchor)
                 if not response.tool_calls:
                     if self.reply_guard is not None:
+                        guard_started = time.perf_counter()
                         checked = await self.reply_guard(response.content, raw, messages)
+                        timings["guard_seconds"] += time.perf_counter()-guard_started
                         response = response.model_copy(update={"content": checked})
                     guarded, reading_guard = guard_reading_claim(response.content, read_audit(messages))
                     body, reply_parts = prepare_bubbles(guarded, reply_policy)
@@ -121,12 +143,18 @@ class ReadingConversation(Conversation):
                         reading_guard=reading_guard, reply_parts=reply_parts,
                         **({"quality_review": self.reply_guard.last_check} if self.reply_guard is not None
                            and hasattr(self.reply_guard, "last_check") else {}))
+                    timings["total_seconds"] = time.perf_counter()-started
+                    timings["local_other_seconds"] = max(0., timings["total_seconds"] - sum(
+                        value for key, value in timings.items() if key != "total_seconds"))
+                    latency = {key: round(value, 4) for key, value in timings.items()}
+                    latency["context_preparation"] = preparation
+                    logger.info("MYATRI reply generation latency: %s", compact_json(latency))
                     if self.protocol_store:
                         protocol = {"status": "completed", "snapshot": snapshot,
                             "steps": step+1, "reply_ref": answer.ref, "sent_at": raw.created_at,
                             "replied_at": answer.created_at, "full_checkpoint": checkpoint,
                             "tool_audit": read_audit(messages), "reading_guard": reading_guard,
-                            "context_stats": turn_stats}
+                            "context_stats": turn_stats, "latency": latency}
                         if self.thinking:
                             # Provider protocol data, never character memory. Needed
                             # when a later tools-enabled request replays this answer.
@@ -140,6 +168,7 @@ class ReadingConversation(Conversation):
                     if self.on_answer:
                         self.on_answer(answer)
                     return answer
+                tools_started = time.perf_counter()
                 for call in response.tool_calls:
                     try:
                         name = call["function"]["name"]
@@ -151,6 +180,11 @@ class ReadingConversation(Conversation):
                             result = recall_directory(bundle, self.store)
                         elif name in self.tool_handlers:
                             result = self.tool_handlers[name][1](**args)
+                            # A blocking backend (e.g. an out-of-process search) must
+                            # not stall the loop shared by every group, so async
+                            # handlers are awaited and run in their own worker thread.
+                            if inspect.isawaitable(result):
+                                result = await result
                             if name == "read_group_message":
                                 result = cold_page(result, args["message_id"], read_audit(messages))
                         else:
@@ -163,6 +197,7 @@ class ReadingConversation(Conversation):
                     except (ValueError, KeyError, StopIteration, jsonschema.ValidationError) as exc:
                         result = {"error": type(exc).__name__, "message": "tool arguments or source invalid"}
                     messages.append({"role": "tool", "tool_call_id": call["id"], "content": compact_json(result)})
+                timings["tool_seconds"] += time.perf_counter()-tools_started
                 if self.protocol_store:
                     self.protocol_store.save_protocol(raw.record_id, {"status": "active", "snapshot": snapshot,
                         "steps": step+1, "messages": messages, "tool_audit": read_audit(messages),

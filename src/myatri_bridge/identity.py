@@ -110,6 +110,12 @@ class IdentityRegistry:
 
     def observe(self, scope: str, message: Mapping, *, source_id: str = "") -> bool:
         """Observe channel metadata, ignoring text claims and assistant output."""
+        with closing(self._connect()) as db, db:
+            return self._observe(db, scope, message, source_id=source_id)
+
+    @staticmethod
+    def _observe(db, scope: str, message: Mapping, *, source_id: str = "") -> bool:
+        """Apply one observation on the caller's transaction, including backfill."""
         member_id = message.get("sender_id")
         if not _valid_id(member_id) or not _human(message):
             return False
@@ -118,34 +124,41 @@ class IdentityRegistry:
         timestamp = _time(message.get("sent_at"))
         source = str(message.get("message_id") or source_id or "")
         archive_source = str(source_id or message.get("archive_source_id") or "")
-        with closing(self._connect()) as db, db:
-            db.execute("""INSERT INTO members VALUES (?,?,?,?)
+        db.execute("""INSERT INTO members VALUES (?,?,?,?)
                 ON CONFLICT(scope,member_id) DO UPDATE SET
                     display_name=CASE WHEN excluded.last_seen >= members.last_seen
                         AND excluded.display_name != '' THEN excluded.display_name
                         ELSE members.display_name END,
-                    last_seen=MAX(members.last_seen,excluded.last_seen)""",
+                    last_seen=MAX(members.last_seen,excluded.last_seen)
+                WHERE excluded.last_seen > members.last_seen
+                    OR (excluded.last_seen >= members.last_seen AND excluded.display_name != ''
+                        AND excluded.display_name != members.display_name)""",
                        (scope, member_id, name, timestamp))
-            if name:
-                db.execute("""INSERT INTO aliases VALUES (?,?,?,?,?,?)
+        if name:
+            db.execute("""INSERT INTO aliases VALUES (?,?,?,?,?,?)
                     ON CONFLICT(scope,member_id,name,source_id) DO UPDATE SET
                     archive_source_id=CASE WHEN excluded.archive_source_id != ''
-                        THEN excluded.archive_source_id ELSE aliases.archive_source_id END""",
+                        THEN excluded.archive_source_id ELSE aliases.archive_source_id END
+                WHERE excluded.archive_source_id != ''
+                    AND excluded.archive_source_id != aliases.archive_source_id""",
                            (scope, member_id, name, source, timestamp, archive_source))
         return True
 
     def backfill(self, scope: str, records: Iterable[Any]) -> dict:
         """Read old envelopes only; do not infer IDs from names in plain text."""
         records_seen = observations = ignored = 0
-        for record in records:
-            records_seen += 1
-            for message in _messages(record):
-                if (isinstance(message.get("sender_name"), str) and message["sender_name"].strip()
-                        and self.observe(scope, message, source_id=message["archive_source_id"])):
-                    observations += 1
-                else:
-                    ignored += 1
-        with closing(self._connect()) as db:
+        # Old envelopes can repeat the same recent history hundreds of times.
+        # One connection and commit avoids per-observation disk synchronization
+        # during application initialization. Preserve the original observation order.
+        with closing(self._connect()) as db, db:
+            for record in records:
+                records_seen += 1
+                for message in _messages(record):
+                    if (isinstance(message.get("sender_name"), str) and message["sender_name"].strip()
+                            and self._observe(db, scope, message, source_id=message["archive_source_id"])):
+                        observations += 1
+                    else:
+                        ignored += 1
             members = db.execute("SELECT COUNT(*) FROM members WHERE scope=?", (scope,)).fetchone()[0]
             aliases = db.execute("SELECT COUNT(*) FROM aliases WHERE scope=?", (scope,)).fetchone()[0]
         return {"records_seen": records_seen, "observations": observations,

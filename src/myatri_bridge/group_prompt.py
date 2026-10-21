@@ -85,6 +85,7 @@ def render_group_policy(identity_context: dict, current_message: dict,
         "owner_binding_verified": verified,
         "current_is_verified_owner": current_is_owner,
         "current_is_bot_output": bot_output,
+        "current_addresses_bot": current_message.get("addressing_bot") is True,
         "owner_account_shared_with_bot": bool(verified and bot_id == owner_id),
         "identity_authority": "transport_sender_id_and_manual_owner_config_only",
     }
@@ -95,11 +96,15 @@ def render_group_policy(identity_context: dict, current_message: dict,
     )
     if bot_output:
         status += "当前信封是机器人输出，不是人类自述，不能作为人类身份或偏好的证据。"
-    elif current_is_owner:
-        status += ("\n本轮亲近分寸：对这位已核验的创作者，可以偶尔含蓄地表示依恋、惦记和一点暧昧；"
-                   "以当前话题为主，不刻意撩拨，不每句撒娇，也不要求他回应或证明亲近。")
     else:
-        status += "\n本轮亲近分寸：按当前成员实际建立的关系自然相处，不套用对创作者的依恋或默认暧昧。"
+        if current_is_owner:
+            status += ("\n本轮亲近分寸：对这位已核验的创作者，可以偶尔含蓄地表示依恋、惦记和一点暧昧；"
+                       "以当前话题为主，不刻意撩拨，不每句撒娇，也不要求他回应或证明亲近。")
+        else:
+            status += "\n本轮亲近分寸：按当前成员实际建立的关系自然相处，不套用对创作者的依恋或默认暧昧。"
+        if current_message.get("addressing_bot") is True:
+            status += ("\n本轮对方是在回应你刚才说过的话。你上一句的内容已经在历史里，"
+                       "不要复述它、不要重新解释一遍，直接接住对方的意思再往下说。")
     data = {
         "channel_derived_identity": derived,
         "identity_context": identity_view(identity_context),

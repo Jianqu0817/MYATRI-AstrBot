@@ -6,6 +6,7 @@ import asyncio
 import os
 from pathlib import Path
 import time
+from typing import TYPE_CHECKING
 
 import httpx
 from astrbot.api import logger
@@ -21,6 +22,11 @@ from astrbot.api.platform import (
 )
 
 from .wechatagent_client import NativeClient, NotReady, Settings, incoming
+
+if TYPE_CHECKING:
+    # 仅用于类型标注：运行期导入会绑定到 AstrBot 的模块路径，避免插件加载顺序问题。
+    from astrbot.api.event import MessageChain
+    from astrbot.core.platform.message_session import MessageSesion
 
 
 class WeChatAgentEvent(AstrMessageEvent):
@@ -55,11 +61,37 @@ class WeChatAgentPlatform(Platform):
             description="Local WeChatAgent transport",
             id=platform_config["id"],
             support_streaming_message=False,
-            support_proactive_message=False,
+            support_proactive_message=True,
         )
 
     def meta(self):
         return self.metadata
+
+    async def send_by_session(
+        self, session: MessageSesion, message_chain: MessageChain
+    ) -> None:
+        """主动发送：不依赖事件对象，复用 NativeClient.send 的回执验证。
+
+        Args:
+            session: 目标会话（AstrBot 的 unified_msg_origin / MessageSesion）。
+            message_chain: 消息链；本适配器只接受纯文本（Plain），其他类型抛
+                ``NotReady("TEXT_ONLY")``。
+
+        Raises:
+            NotReady: 非文本消息、平台未绑定，或发送前账号/版本校验失败。
+        """
+        await super().send_by_session(session, message_chain)
+        chain = getattr(message_chain, "chain", None)
+        if not chain or any(not isinstance(part, Plain) for part in chain):
+            raise NotReady("TEXT_ONLY")
+        text = "".join(part.text for part in chain)
+        if not text.strip():
+            raise NotReady("TEXT_ONLY")
+        if self.native is None:
+            raise NotReady("NATIVE_NOT_BOUND")
+        # 发送前再校验账号与版本；NativeClient.send 内部还会独立校验一次。
+        await self.native.check()
+        await self.native.send(text)
 
     def event(self, payload):
         item = incoming(payload, self.native, self.started_at)

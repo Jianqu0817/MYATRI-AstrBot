@@ -3,9 +3,9 @@ endpoint = "https://api.deepseek.com"
 model = "deepseek-flash"
 allow_paid = false
 capabilities_verified = true
-# Conversation only. DeepSeek low/high/max: high is the middle tier (medium maps to high).
+# Conversation only. Keep thinking enabled; low reduces routine chat latency.
 thinking = true
-reasoning_effort = "high"
+reasoning_effort = "low"
 # Combined reasoning + answer ceiling, not a target or a separate reasoning cap.
 thinking_max_tokens = 8192
 thinking_timeout = 120

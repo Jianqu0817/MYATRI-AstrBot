@@ -29,9 +29,24 @@ from .memory_review import review_summary
 from .reply_guard import ReplyGuard
 from .reading_conversation import ReadingConversation
 from .health import DELIVERY_REASONS, health_snapshot
+from .proactive import (Candidate, JsonlDiagnostics, ProactiveScheduler,
+                        is_listening_evidence, is_self_initiated)
 
 
 logger = logging.getLogger(__name__)
+# src/matri_bridge/bridge.py -> project root, used only to place agent scratch dirs.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _aware(value):
+    """Parse an ISO timestamp defensively; anything unusable becomes None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.astimezone()
 
 
 class QuotedMessage(BaseModel):
@@ -137,6 +152,19 @@ class Bridge:
         self.summary_task = None
         self.last_cold_prune = 0
         self.routes = {}
+        # Out-of-process web search is strictly opt-in: disabled means no client,
+        # no tool registration and no extra SQLite file.
+        self.web_config = dict(config.get("web") or {})
+        self.web_enabled = bool(self.web_config.get("enabled", False))
+        if self.web_enabled:
+            for required in ("node_path", "bin_path"):
+                if not self.web_config.get(required):
+                    raise ValueError(f"[bridge.web] enabled requires {required}")
+        self.web_tools = {}
+        # Proactive speech is off by default; the scheduler is only constructed
+        # for scopes that have actually been observed.
+        self.proactive_config = dict(config.get("proactive") or {})
+        self.proactive_schedulers = {}
         with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("""CREATE TABLE IF NOT EXISTS deliveries (
                 id TEXT PRIMARY KEY, scope TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -162,6 +190,9 @@ class Bridge:
                     db.execute(f"ALTER TABLE deliveries ADD COLUMN {column} {definition}")
             db.execute("CREATE TABLE IF NOT EXISTS seen_messages (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS group_routes (scope TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            db.execute("""CREATE TABLE IF NOT EXISTS proactive_sources (
+                scope TEXT NOT NULL,candidate_id TEXT NOT NULL,delivery_id TEXT NOT NULL,
+                PRIMARY KEY(scope,candidate_id))""")
             self.routes = {row[0]: json.loads(row[1]) for row in db.execute("SELECT * FROM group_routes")}
 
     def _cache_message(self, db, scope, key, fingerprint, payload):
@@ -239,6 +270,16 @@ class Bridge:
             if self.cold_archive.days:
                 app.conversation.tool_handlers["read_group_message"] = (COLD_TOOL,
                     lambda **kwargs: self.cold_archive.read(message.scope, **kwargs))
+            web = self._web_tool(app_root)
+            if web is not None:
+                tool, search = web
+
+                async def web_search(**kwargs):
+                    # The backend is a blocking subprocess. Off-load it so one slow
+                    # search cannot stall the loop shared by every group.
+                    return await asyncio.to_thread(search.search, **kwargs)
+
+                app.conversation.tool_handlers["web_search"] = (tool, web_search)
             self.identities.backfill(message.scope, app.store.list_records("raw_message"))
             self.apps[message.scope] = app
         if start_workers and message.scope not in self.tasks:
@@ -250,6 +291,248 @@ class Bridge:
             task.result()
             raise RuntimeError("group background worker stopped")
         return self.apps[message.scope]
+
+    def _web_tool(self, app_root):
+        """Return this group's (tool schema, searcher) pair, or None when disabled.
+
+        One cache/quota database per group: one group must not spend another
+        group's daily allowance or read its cached results.
+        """
+        if not self.web_enabled:
+            return None
+        entry = self.web_tools.get(app_root)
+        if entry is not None:
+            return entry
+        from .dsh_client import DshClient, default_workdir
+        from .web_tools import WEB_SEARCH_TOOL, DshBackend, WebSearch
+        # The backend key is read from Windows Credential Manager at runtime and
+        # handed to the child explicitly; it is never written to config or logs.
+        from myatri.credentials import read_deepseek_key
+        api_key = read_deepseek_key()
+        if not api_key:
+            logger.warning("Web search is enabled but no DeepSeek credential is configured")
+        client = DshClient(
+            node_path=self.web_config["node_path"],
+            bin_path=self.web_config["bin_path"],
+            workdir=default_workdir(PROJECT_ROOT),
+            timeout_seconds=float(self.web_config.get("timeout_seconds", 25)),
+            extra_env={"DEEPSEEK_API_KEY": api_key} if api_key else None,
+        )
+        search = WebSearch(
+            app_root / "web.sqlite3",
+            backend=DshBackend(client),
+            daily_limit=int(self.web_config.get("daily_limit", 40)),
+            cache_ttl_hours=float(self.web_config.get("cache_ttl_hours", 24)),
+            timeout_seconds=float(self.web_config.get("timeout_seconds", 25)),
+            default_max_results=int(self.web_config.get("max_results", 3)),
+            audit_sink=self._web_audit,
+            logger=logger,
+        )
+        entry = self.web_tools[app_root] = (WEB_SEARCH_TOOL, search)
+        return entry
+
+    @staticmethod
+    def _web_audit(record):
+        """Log the query hash and outcome only; query text never reaches the log."""
+        logger.info("Group web search: %s", json.dumps(record, ensure_ascii=False, sort_keys=True))
+
+    # ------------------------------------------------------------ proactive
+
+    def _ensure_proactive(self, scope):
+        """Start one scheduler per observed scope; idempotent and cheap.
+
+        ``enabled=false`` still creates the task: ``run()`` records a single
+        diagnostic and returns, so a disabled bridge never queues speech.
+        """
+        if scope in self.proactive_schedulers or not self.proactive_config:
+            return None
+        scheduler = ProactiveScheduler(
+            self.proactive_config,
+            scope=scope,
+            state=self._proactive_state,
+            candidates=self._proactive_candidates,
+            generate=self._proactive_generate,
+            deliver=self._proactive_deliver,
+            clock=lambda: datetime.now().astimezone(),
+            diagnostic=JsonlDiagnostics(PROJECT_ROOT),
+            base_dir=PROJECT_ROOT,
+        )
+        self.proactive_schedulers[scope] = (
+            scheduler, asyncio.create_task(scheduler.run()))
+        return scheduler
+
+    def _proactive_state(self, scope):
+        """Snapshot the facts the gates need, read from the durable ledger."""
+        now = datetime.now().astimezone()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        with closing(sqlite3.connect(self.path)) as db:
+            last = db.execute(
+                "SELECT MAX(updated) FROM deliveries WHERE scope=? AND status IN ('sent','sending')",
+                (scope,)).fetchone()[0]
+            today = db.execute(
+                "SELECT COUNT(*) FROM deliveries WHERE scope=? AND trigger_kind='proactive' "
+                "AND status IN ('prepared','sending','sent','unknown') "
+                "AND COALESCE(received_at,updated)>=?", (scope, day_start)).fetchone()[0]
+            pending = db.execute(
+                "SELECT 1 FROM deliveries WHERE scope=? AND trigger_kind='explicit' "
+                "AND status IN ('received','prepared')", (scope,)).fetchone()
+        group_last = None
+        recent = self.short_memory.recent(scope, limit=1)
+        if recent:
+            group_last = _aware(recent[-1].get("sent_at"))
+        return {
+            "last_speech_at": datetime.fromtimestamp(last, timezone.utc) if last else None,
+            "proactive_today": today,
+            "group_last_message_at": group_last,
+            "budget_used_ratio": self._proactive_budget_ratio(scope),
+            "explicit_reply_pending": bool(pending),
+        }
+
+    def _proactive_budget_ratio(self, scope):
+        """Sum today's recorded usage; None means unknown, which skips speech."""
+        app = self.apps.get(scope)
+        if app is None:
+            return None
+        limit = getattr(app.gateway, "daily_token_limit", 0)
+        if not limit:
+            return None
+        day = datetime.now().strftime("%Y-%m-%d")
+        used = 0
+        with closing(sqlite3.connect(app.root / "runtime.sqlite3")) as db:
+            for (payload,) in db.execute("SELECT payload FROM usage"):
+                try:
+                    record = json.loads(payload)
+                except ValueError:
+                    continue
+                if record.get("day") != day:
+                    continue
+                used += int((record.get("usage") or {}).get("total_tokens") or 0)
+        return min(1.0, used / limit)
+
+    def _proactive_candidates(self, scope):
+        """Only sources that are genuinely unfinished or addressed to nobody."""
+        now = datetime.now().astimezone()
+        found = []
+        with closing(sqlite3.connect(self.path)) as db:
+            consumed = {row[0] for row in db.execute(
+                "SELECT candidate_id FROM proactive_sources WHERE scope=?", (scope,))}
+            rows = db.execute(
+                "SELECT id,envelope,COALESCE(received_at,updated) FROM deliveries "
+                "WHERE scope=? AND trigger_kind='explicit' AND status='received' "
+                "ORDER BY COALESCE(received_at,updated) LIMIT 3", (scope,)).fetchall()
+        for key, envelope, received in rows:
+            if key in consumed:
+                continue
+            try:
+                payload = json.loads(envelope) if envelope else {}
+            except ValueError:
+                payload = {}
+            if is_self_initiated(payload):
+                continue
+            found.append(Candidate(
+                candidate_id=key, kind="failed_explicit", created_at=now,
+                reason="明确呼叫但上次生成失败", context_hash=digest([scope, key]),
+                excerpt=str(payload.get("text", ""))[:200],
+                source_at=datetime.fromtimestamp(received, timezone.utc) if received else None))
+        if not found:
+            for message in self.short_memory.recent(scope, limit=8):
+                if message.get("message_id") in consumed:
+                    continue
+                if is_self_initiated(message):
+                    continue
+                text = str(message.get("text", "")).strip()
+                if text.endswith(("？", "?")):
+                    found.append(Candidate(
+                        candidate_id=str(message.get("message_id")), kind="unanswered_question",
+                        created_at=now, reason="群里有一个还没人接的问句",
+                        context_hash=digest([scope, message.get("message_id")]),
+                        excerpt=text[:200], source_at=_aware(message.get("sent_at"))))
+                    break
+        return found
+
+    async def _proactive_generate(self, *, scope, candidate, now, instruction):
+        """Generate one proactive utterance without writing a human-looking turn.
+
+        The instruction is ours, never a member's. It is presented to the model as
+        system framing for this single request and is deliberately not archived as
+        a ``raw_message``; only the confirmed answer enters history later, through
+        ``acknowledge()``, as ``role="assistant"``. That keeps every human-evidence
+        gate (`role == "user"`) untouched.
+        """
+        app = self.apps.get(scope)
+        if app is None or scope not in self.routes:
+            return None
+        with closing(sqlite3.connect(self.path)) as db:
+            if db.execute("SELECT 1 FROM proactive_sources WHERE scope=? AND candidate_id=?",
+                          (scope, candidate.candidate_id)).fetchone():
+                return None
+        from myatri.contracts import ModelRequest
+        from .bubbles import prepare_bubbles
+        from .proactive import SELF_INITIATED_METADATA
+        from .proactive_prompt import render_proactive_instructions
+        context = app.conversation.context
+        try:
+            messages, _snapshot = await context.abuild_context(
+                instruction, tools=[], persist_activation=False)
+            # Replace the trailing "current message" turn with system framing: the
+            # text came from us, so the model must not read it as user speech.
+            for index in range(len(messages) - 1, -1, -1):
+                if messages[index].get("role") == "user":
+                    messages[index] = {
+                        "role": "system",
+                        "content": render_proactive_instructions(
+                            kind=candidate.kind, reason=candidate.reason,
+                            excerpt=candidate.excerpt, context_hash=candidate.context_hash) + "\n"
+                                   + str(messages[index].get("content", "")),
+                    }
+                    break
+            request = ModelRequest(
+                messages=messages, tools=[], role="foreground", purpose="proactive_speak",
+                budget_tokens=context.budget.limit,
+                max_tokens=min(context.budget.output_reserve, 512),
+                estimated_input_tokens=context.budget.estimate(messages, []))
+            context.budget.require(messages, [])
+            response = await app.gateway.generate(request)
+            context.budget.calibrate(messages, response.usage, [])
+        except Exception as error:  # noqa: BLE001 - the scheduler records the decline
+            logger.info("Proactive generation declined: %s", type(error).__name__)
+            return None
+        text = (response.content or "").strip()
+        if not text:
+            return None
+        body, parts = prepare_bubbles(text, context.reply_policy)
+        if not body or not parts:
+            return None
+        return {
+            "parts": parts,
+            "text": body,
+            "metadata": dict(SELF_INITIATED_METADATA),
+            "record_id": "pro_" + digest([scope, candidate.candidate_id, body])[:32],
+            "context_hash": digest([scope, candidate.candidate_id]),
+        }
+
+    async def _proactive_deliver(self, *, scope, candidate, draft, now):
+        """Persist an already-generated proactive utterance as a prepared delivery."""
+        parts = list(draft.parts)
+        epoch = now.timestamp()
+        key = "pro_" + digest([scope, candidate.candidate_id, draft.context_hash])[:48]
+        fingerprint = digest({"scope": scope, "candidate": candidate.candidate_id, "parts": parts})
+        with closing(sqlite3.connect(self.path)) as db, db:
+            # A replay must never resurrect sent/unknown or reset partial progress.
+            # Serialize the source claim and delivery insert across processes.
+            db.execute("BEGIN IMMEDIATE")
+            prior = db.execute("SELECT delivery_id FROM proactive_sources WHERE scope=? AND candidate_id=?",
+                               (scope, candidate.candidate_id)).fetchone()
+            if prior:
+                return self._delivery_result(db, prior[0])
+            db.execute(
+                "INSERT OR IGNORE INTO deliveries "
+                "(id,scope,fingerprint,status,reply,reply_ref,updated,envelope,trigger_kind,received_at,reply_parts,sent_parts) "
+                "VALUES (?,?,?,'prepared',?,NULL,?,NULL,'proactive',?,?,0)",
+                (key, scope, fingerprint, "\n".join(parts), epoch, epoch,
+                 json.dumps(parts, ensure_ascii=False)))
+            db.execute("INSERT INTO proactive_sources VALUES(?,?,?)", (scope, candidate.candidate_id, key))
+            return self._delivery_result(db, key)
 
     def _control_app(self, scope):
         # Restrict controls to an observed local group; never accept arbitrary paths.
@@ -346,6 +629,8 @@ class Bridge:
     def start(self):
         if self.summary_task is None:
             self.summary_task = asyncio.create_task(self._summary_loop())
+        for scope in self.routes:
+            self._ensure_proactive(scope)
 
     async def retry_summaries(self, scope):
         async with self.admin_lock:
@@ -357,6 +642,9 @@ class Bridge:
             return {"ok": True, "action": "retry-summaries", "windows": result["windows"]}
 
     async def _summary_loop(self):
+        # aiohttp schedules this task before its listening socket is created.
+        # Yield a short startup grace before any synchronous archive/index load.
+        await asyncio.sleep(1)
         while True:
             if time.time() - self.last_cold_prune >= 3600:
                 self.cold_archive.prune()
@@ -427,18 +715,36 @@ class Bridge:
                         payload["reply_to_id"] = matches[0]["message_id"]
                         payload["quote_resolution"] = "matched_one_original_transport_message_in_this_group"
                     else:
-                        payload["quote_resolution"] = "unverified_quote_not_original_member_evidence"
+                        # The quoted text may be the bot's own confirmed reply, which
+                        # members answer without an At. Only the assistant-context table
+                        # holds those, and only a unique match may bind the reference.
+                        own = [] if matches else [
+                            m for m in self.short_memory.recent_assistant(message.scope)
+                            if m["sender_id"] == quote["sender_id"] and m["text"] == quote["text"]]
+                        if len(own) == 1:
+                            payload["reply_to_id"] = own[0]["message_id"]
+                            payload["quote_resolution"] = "quoted_bot_own_message"
+                            # A member replying to the bot is addressing it explicitly.
+                            payload["addressing_bot"] = True
+                        else:
+                            payload["quote_resolution"] = "unverified_quote_not_original_member_evidence"
                 payload["topic_id"] = self.topics.add(message.scope, payload)
                 self.cold_archive.add(message.scope, payload)
                 self.identities.observe(message.scope, payload)
-                self.short_memory.add(message.scope, payload)
+                if is_listening_evidence(payload):
+                    self.short_memory.add(message.scope, payload)
                 self.routes[message.scope] = message.model_dump()
+                self._ensure_proactive(message.scope)
                 db.execute("INSERT OR REPLACE INTO group_routes VALUES (?,?)",
                            (message.scope, json.dumps(self.routes[message.scope], ensure_ascii=False)))
                 db.execute("INSERT OR IGNORE INTO seen_messages VALUES (?,?)", (message.key, fingerprint))
                 self._cache_message(db, message.scope, message.key, fingerprint, payload)
                 if not old:
-                    explicit = message.mentioned or any(word in message.text for word in ("小温暖", "小溫暖"))
+                    # Quoting one of the bot's own confirmed replies is an explicit
+                    # address, even without an At or a keyword.
+                    explicit = (message.mentioned
+                                or any(word in message.text for word in ("小温暖", "小溫暖"))
+                                or payload.get("quote_resolution") == "quoted_bot_own_message")
                     # A uniform hash draw keeps the 5% decision stable on retries/restarts.
                     draw = int(digest(["random-reply-v1", message.key])[:13], 16) / 16**13
                     if not explicit and draw >= self.random_probability:
@@ -478,11 +784,14 @@ class Bridge:
             logger.warning("Group generation failed; original input retained: %s", type(task.exception()).__name__)
 
     async def _generate(self, message, envelope):
+        queued = time.perf_counter()
         async with self.group_locks.setdefault(message.scope, asyncio.Lock()):
+            acquired = time.perf_counter()
             with closing(sqlite3.connect(self.path)) as db, db:
                 if self._superseded(db, message.key):
                     return {"id": message.key, "status": "ignored", "reason": "stale_random_reply"}
             app = self._application(message)
+            initialized = time.perf_counter()
             try:
                 prior = app.store.get_record(message.key)
                 metadata = {k: v for k, v in prior.payload.items() if k != "role"}
@@ -495,6 +804,13 @@ class Bridge:
                             "logical_source_key": digest([message.scope, message.message_id]),
                             "evidence_not_independent_of_same_message_id": True}
             answer = await app.conversation.respond(envelope, message_id=message.key, metadata=metadata)
+            protocol = app.queue.get_protocol(message.key)
+            if protocol and protocol.get("status") == "completed" and "latency" in protocol:
+                protocol["latency"].update(
+                    group_queue_seconds=round(acquired-queued, 4),
+                    application_seconds=round(initialized-acquired, 4),
+                    generation_to_ready_seconds=round(time.perf_counter()-queued, 4))
+                app.queue.save_protocol(message.key, protocol)
             with closing(sqlite3.connect(self.path)) as db, db:
                 if self._superseded(db, message.key):
                     return {"id": message.key, "status": "ignored", "reason": "stale_random_reply"}
@@ -527,11 +843,28 @@ class Bridge:
             with closing(sqlite3.connect(self.path)) as db, db:
                 if self._superseded(db, key):
                     return {"claimed": False}
+                if key.startswith("pro_") and self._proactive_stale(db, key):
+                    return {"claimed": False}
                 changed = db.execute(
                     "UPDATE deliveries SET status='sending',updated=? WHERE id=? AND status='prepared'",
                     (time.time(), key),
                 ).rowcount
             return {"claimed": bool(changed)}
+
+    def _proactive_stale(self, db, key):
+        """A proactive line must not be spoken after the moment has passed."""
+        row = db.execute("SELECT scope,COALESCE(received_at,updated) FROM deliveries WHERE id=?",
+                         (key,)).fetchone()
+        if not row:
+            return False
+        newer = db.execute(
+            "SELECT 1 FROM deliveries WHERE scope=? AND trigger_kind='explicit' "
+            "AND rowid>(SELECT rowid FROM deliveries WHERE id=?) LIMIT 1", (row[0], key)).fetchone()
+        ttl = float(self.proactive_config.get("candidate_ttl_seconds", 45) or 45)
+        if newer or time.time() - row[1] > ttl:
+            db.execute("UPDATE deliveries SET status='superseded' WHERE id=?", (key,))
+            return True
+        return False
 
     async def acknowledge(self, key, status, part_index=None, *, reason_code=None, elapsed_seconds=None):
         if status not in {"sent", "unknown"}:
@@ -572,24 +905,38 @@ class Bridge:
                 db.execute("INSERT INTO delivery_events(delivery_id,status,part_index,reason_code,elapsed_seconds,created) "
                     "VALUES(?,?,?,?,?,?)", (key, status, part_index,
                     (reason_code or "unclassified") if status == "unknown" else None, elapsed_seconds, time.time()))
-                if status == "sent" and row[7]:
-                    original = json.loads(row[7])
-                    # Old clients send the full reply once and use the original ack.
-                    confirmed = [(i, parts[i]) for i in range(completed, end)] if part_index is not None else [(0, row[4])]
-                    for index, text in confirmed:
-                        own_message = {field: original[field] for field in ("platform_id", "bot_id", "group_id")}
-                        own_message.update(sender_id=original["bot_id"], sender_name="小温暖",
-                                           message_id="reply_" + key + (f"_part{index+1}" if index else ""), text=text,
-                                           sent_at=datetime.now(timezone.utc).isoformat(), role="assistant")
-                        own_message["reply_to_id"] = original["message_id"]
-                        own_message["topic_id"] = self.topics.add(row[1], own_message)
-                        self.cold_archive.add(row[1], own_message)
-                        self.short_memory.add_assistant_context(row[1], own_message)
-                        self._cache_message(db, row[1], own_message["message_id"], digest(own_message), own_message)
+                if status == "sent" and (row[7] or row[8] == "proactive"):
+                    if row[7]:
+                        original = json.loads(row[7])
+                    else:
+                        # A proactive utterance has no inbound envelope; reuse the
+                        # last observed route so its own words still enter history.
+                        original = dict(self.routes.get(row[1]) or {})
+                        original.pop("message_id", None)
+                    if original.get("bot_id"):
+                        # Old clients send the full reply once and use the original ack.
+                        confirmed = [(i, parts[i]) for i in range(completed, end)] if part_index is not None else [(0, row[4])]
+                        for index, text in confirmed:
+                            own_message = {field: original[field] for field in ("platform_id", "bot_id", "group_id")}
+                            own_message.update(sender_id=original["bot_id"], sender_name="小温暖",
+                                               message_id="reply_" + key + (f"_part{index+1}" if index else ""), text=text,
+                                               sent_at=datetime.now(timezone.utc).isoformat(), role="assistant")
+                            if original.get("message_id"):
+                                own_message["reply_to_id"] = original["message_id"]
+                            own_message["topic_id"] = self.topics.add(row[1], own_message)
+                            self.cold_archive.add(row[1], own_message)
+                            self.short_memory.add_assistant_context(row[1], own_message)
+                            self._cache_message(db, row[1], own_message["message_id"], digest(own_message), own_message)
             # Preserve the legacy whole-reply acknowledgement response shape.
             return {"status": next_status, **({"sent_parts": end} if part_index is not None else {})}
 
     async def close(self):
+        for scheduled, task in list(self.proactive_schedulers.values()):
+            scheduled.stop()
+            task.cancel()
+        await asyncio.gather(*(task for _, task in self.proactive_schedulers.values()),
+                             return_exceptions=True)
+        self.proactive_schedulers.clear()
         if self.summary_task:
             self.summary_task.cancel()
             await asyncio.gather(self.summary_task, return_exceptions=True)
@@ -611,6 +958,12 @@ class Bridge:
         return {"version": "0.2.8", "health": health_snapshot(self.root),
             "active_generations": len(self.generations), "deliveries": deliveries,
             "cold_archive": {"retention_days": self.cold_archive.days, "messages": count, "compressed_bytes": size},
+            "features": {"web_enabled": self.web_enabled,
+                         "web_groups": len(self.web_tools),
+                         "proactive_enabled": bool(self.proactive_config.get("enabled")),
+                         "proactive_shadow": bool(self.proactive_config.get("shadow_mode", True)),
+                         "proactive_scopes": len(self.proactive_schedulers),
+                         "proactive_daily_limit": self.proactive_config.get("daily_limit", 10)},
             "summary_rejections": self.short_memory.rejection_diagnostics(),
             "pending_summary_jobs": pending, "groups": [{"scope": scope,
                 "listening": self.short_memory.stats(scope), "short_summaries": len(self.short_memory.summaries(scope)),

@@ -28,7 +28,8 @@ def settings():
 
 
 def backend(
-    *, version="4.1.10.27", accounts=None, duplicate=False, receipt=True, sent_flag=True
+    *, version="4.1.10.27", accounts=None, duplicate=False, receipt=True, sent_flag=True,
+    receipt_age=0, preexisting=False, server_id="9007199254740993", receipt_text="你好"
 ):
     calls = []
 
@@ -72,13 +73,13 @@ def backend(
                         {
                             "localId": 7,
                             "localType": 1,
-                            "createTime": int(time.time()),
+                            "createTime": int(time.time()) - receipt_age,
                             "isSend": sent_flag,
-                            "fullText": "你好",
-                            "serverId": "9007199254740993",
+                            "fullText": receipt_text,
+                            "serverId": server_id,
                         }
                     ]
-                    if sent and receipt
+                    if (sent or preexisting) and receipt
                     else []
                 )
             }
@@ -123,6 +124,32 @@ async def test_receipt_and_unknown_outcome_submit_exactly_once():
             assert sum(r.url.path == "/SendTextMsg" for r in calls) == 1
         finally:
             await client.close()
+
+
+@pytest.mark.parametrize("options,accepted", [
+    ({"receipt_age": 1}, True),
+    ({"receipt_age": 6}, True),
+    ({"receipt_age": 10}, True),
+    ({"receipt_age": 11}, False),
+    ({"receipt_age": -11}, False),
+    ({"receipt_age": 1, "preexisting": True}, False),
+    ({"receipt_age": 1, "server_id": "0"}, False),
+    ({"receipt_age": 1, "receipt_text": "另一条消息"}, False),
+])
+async def test_receipt_clock_skew_keeps_identity_and_single_submission(options, accepted, monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: 1792593686.3)
+    transport, calls = backend(**options)
+    client = NativeClient(settings(), transport=transport, receipt_timeout=0)
+    try:
+        await client.bind()
+        if accepted:
+            await client.send("你好")
+        else:
+            with pytest.raises(NotReady, match="SEND_RECEIPT_UNKNOWN"):
+                await client.send("你好")
+        assert sum(r.url.path == "/SendTextMsg" for r in calls) == 1
+    finally:
+        await client.close()
 
 
 @pytest.mark.parametrize("flag", [1, "1", "true"])
