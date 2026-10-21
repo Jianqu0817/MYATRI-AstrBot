@@ -14,6 +14,7 @@ import tomllib
 import webbrowser
 
 from aiohttp import web
+from .health import health_snapshot
 
 
 def _read_config(path):
@@ -173,9 +174,13 @@ def snapshot(project):
     if short.exists():
         try:
             with closing(_connect(short)) as db:
-                pending = [{"window_end": end, "attempts": attempts, "retry_at": retry, "error_type": error}
-                    for end, attempts, retry, error in db.execute("SELECT end_seq,attempts,next_attempt,last_error "
-                        "FROM listening_pending ORDER BY end_seq LIMIT 30")]
+                columns = {row[1] for row in db.execute("PRAGMA table_info(listening_pending)")}
+                attention = "needs_attention" if "needs_attention" in columns else "0"
+                pending = [{"window_end": end, "attempts": attempts, "retry_at": retry,
+                            "error_type": error, "needs_attention": bool(paused)}
+                    for end, attempts, retry, error, paused in db.execute(
+                        "SELECT end_seq,attempts,next_attempt,last_error," + attention +
+                        " FROM listening_pending ORDER BY end_seq LIMIT 30")]
                 summaries = db.execute("SELECT count(*) FROM listening_summaries").fetchone()[0]
                 listening = db.execute("SELECT COALESCE(SUM(total),0) FROM listening_state").fetchone()[0]
         except sqlite3.Error:
@@ -184,6 +189,7 @@ def snapshot(project):
         "libraries": libraries, "group_daily_budget": _budget(state / "budget.sqlite3",
             engine.get("budget", {}).get("daily_tokens")),
         "listening": {"messages": listening, "summaries": summaries, "pending": pending},
+        "health": health_snapshot(state),
         "measurement": "API确认的最近一次请求用量；生成中不提供逐Token读数。缓存命中仍占上下文；每日累计不等于单次上下文。",
         "privacy": "只读本机计数，不读取或返回聊天正文、密钥、推理文本或账号ID。"}
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 from urllib.parse import urlparse
 
 import httpx
@@ -13,6 +14,24 @@ from astrbot.api.star import Context, Star
 
 # Import registers the platform before AstrBot instantiates configured adapters.
 from . import wechatagent_platform  # noqa: F401
+
+
+def delivery_error_code(error, stage):
+    """Only enumerated diagnostics cross the bridge; never exception contents."""
+    if isinstance(error, asyncio.CancelledError):
+        return "cancelled"
+    if stage == "ack":
+        return "ack_error"
+    if type(error).__name__ == "NotReady":
+        code = str(error)
+        if code == "SEND_RECEIPT_UNKNOWN":
+            return "receipt_timeout"
+        if code == "NATIVE_SEND_REJECTED":
+            return "native_rejected"
+        return "binding_unavailable"
+    if isinstance(error, httpx.HTTPError):
+        return "transport_error"
+    return "send_error"
 
 
 class MyatriPlugin(Star):
@@ -117,6 +136,8 @@ class MyatriPlugin(Star):
         self.inflight.add(fingerprint)
         delivery_id = None
         claimed = False
+        part_started = None
+        stage = "prepare"
         try:
             response = await self.client.post("/v1/messages", json=payload)
             response.raise_for_status()
@@ -137,17 +158,24 @@ class MyatriPlugin(Star):
                 # Hold the route lock for the whole batch. The WeChat adapter
                 # awaits its receipt before event.send returns; do not resend on timeout.
                 for index, text in enumerate(replies):
+                    part_started = time.monotonic()
+                    stage = "send"
                     await event.send(event.plain_result(text))
+                    elapsed = min(3600., time.monotonic() - part_started)
+                    stage = "ack"
                     ack = await self.client.post(
-                        f"/v1/deliveries/{delivery_id}/ack", json={"status": "sent", "part_index": index}
+                        f"/v1/deliveries/{delivery_id}/ack",
+                        json={"status": "sent", "part_index": index, "elapsed_seconds": elapsed}
                     )
                     ack.raise_for_status()
         except (Exception, asyncio.CancelledError) as exc:
-            logger.warning("MYATRI bridge stopped this reply: %s", type(exc).__name__)
+            reason = delivery_error_code(exc, stage)
+            logger.warning("MYATRI bridge stopped this reply: %s", reason)
             if claimed:
                 try:
                     await self.client.post(
-                        f"/v1/deliveries/{delivery_id}/ack", json={"status": "unknown"}
+                        f"/v1/deliveries/{delivery_id}/ack", json={"status": "unknown", "reason_code": reason,
+                            "elapsed_seconds": min(3600., time.monotonic() - part_started) if part_started is not None else None}
                     )
                 except Exception:
                     pass

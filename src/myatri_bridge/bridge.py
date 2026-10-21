@@ -28,6 +28,7 @@ from .cold_archive import ColdArchive, COLD_TOOL
 from .memory_review import review_summary
 from .reply_guard import ReplyGuard
 from .reading_conversation import ReadingConversation
+from .health import DELIVERY_REASONS, health_snapshot
 
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,11 @@ class Bridge:
             db.execute("""CREATE TABLE IF NOT EXISTS deliveries (
                 id TEXT PRIMARY KEY, scope TEXT NOT NULL, fingerprint TEXT NOT NULL,
                 status TEXT NOT NULL, reply TEXT, reply_ref TEXT, updated REAL NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS delivery_events (
+                id INTEGER PRIMARY KEY, delivery_id TEXT NOT NULL, status TEXT NOT NULL,
+                part_index INTEGER, reason_code TEXT, elapsed_seconds REAL, created REAL NOT NULL)""")
+            db.execute("INSERT INTO delivery_events(delivery_id,status,reason_code,created) "
+                "SELECT id,'unknown','process_restart',? FROM deliveries WHERE status='sending'", (time.time(),))
             # A process exit during send cannot establish whether the platform sent it.
             db.execute("UPDATE deliveries SET status='unknown' WHERE status='sending'")
             if "envelope" not in {r[1] for r in db.execute("PRAGMA table_info(deliveries)")}:
@@ -341,6 +347,15 @@ class Bridge:
         if self.summary_task is None:
             self.summary_task = asyncio.create_task(self._summary_loop())
 
+    async def retry_summaries(self, scope):
+        async with self.admin_lock:
+            self._control_app(scope)
+            if self.short_memory._locks.get(scope) and self.short_memory._locks[scope].locked():
+                raise Conflict("summary window is busy")
+            result = self.short_memory.retry_pending(scope, split=True)
+            self.start()
+            return {"ok": True, "action": "retry-summaries", "windows": result["windows"]}
+
     async def _summary_loop(self):
         while True:
             if time.time() - self.last_cold_prune >= 3600:
@@ -389,6 +404,9 @@ class Bridge:
                 if old and old[2] != fingerprint:
                     raise Conflict("message ID reused with different content")
                 if old and old[3] != "received":
+                    # Legacy terminal deliveries remain the primary dedup guard.
+                    # Repair only an observed, fingerprint-matched missing row.
+                    db.execute("INSERT OR IGNORE INTO seen_messages VALUES (?,?)", (message.key, fingerprint))
                     return self._delivery_result(db, message.key)
                 cached = db.execute("SELECT fingerprint FROM seen_messages WHERE id=?", (message.key,)).fetchone()
                 if cached and cached[0] != fingerprint:
@@ -515,9 +533,15 @@ class Bridge:
                 ).rowcount
             return {"claimed": bool(changed)}
 
-    async def acknowledge(self, key, status, part_index=None):
+    async def acknowledge(self, key, status, part_index=None, *, reason_code=None, elapsed_seconds=None):
         if status not in {"sent", "unknown"}:
             raise ValueError("unsupported delivery state")
+        if reason_code is not None and reason_code not in DELIVERY_REASONS:
+            raise ValueError("unsupported delivery reason")
+        if elapsed_seconds is not None:
+            import math
+            if type(elapsed_seconds) not in {int, float} or not math.isfinite(elapsed_seconds) or not 0 <= elapsed_seconds <= 3600:
+                raise ValueError("invalid delivery elapsed time")
         async with self.lock:
             with closing(sqlite3.connect(self.path)) as db, db:
                 row = db.execute(
@@ -545,6 +569,9 @@ class Bridge:
                     end, next_status = completed, status
                 db.execute("UPDATE deliveries SET status=?,sent_parts=?,updated=? WHERE id=?",
                            (next_status, end, time.time(), key))
+                db.execute("INSERT INTO delivery_events(delivery_id,status,part_index,reason_code,elapsed_seconds,created) "
+                    "VALUES(?,?,?,?,?,?)", (key, status, part_index,
+                    (reason_code or "unclassified") if status == "unknown" else None, elapsed_seconds, time.time()))
                 if status == "sent" and row[7]:
                     original = json.loads(row[7])
                     # Old clients send the full reply once and use the original ack.
@@ -576,15 +603,15 @@ class Bridge:
     def diagnostics(self):
         with closing(sqlite3.connect(self.path)) as db:
             deliveries = dict(db.execute("SELECT status,COUNT(*) FROM deliveries GROUP BY status"))
-        with closing(sqlite3.connect(self.short_memory.path)) as db:
-            pending = [{"scope": scope, "window_end": end, "attempts": attempts, "retry_at": retry,
-                        "error": error} for scope, end, attempts, retry, error in db.execute(
-                "SELECT scope,end_seq,attempts,next_attempt,last_error FROM listening_pending ORDER BY scope,end_seq LIMIT 50")]
+        pending = [{**item, "retry_at": item["next_attempt"], "error": item["error_type"]}
+            for item in self.short_memory.pending_diagnostics()]
         with closing(sqlite3.connect(self.cold_archive.path)) as db:
             count, size = db.execute("SELECT COUNT(*),COALESCE(SUM(LENGTH(payload)),0) FROM cold_messages WHERE received>=?",
                                      (time.time()-self.cold_archive.days*86400,)).fetchone()
-        return {"version": "0.2.7", "active_generations": len(self.generations), "deliveries": deliveries,
+        return {"version": "0.2.8", "health": health_snapshot(self.root),
+            "active_generations": len(self.generations), "deliveries": deliveries,
             "cold_archive": {"retention_days": self.cold_archive.days, "messages": count, "compressed_bytes": size},
+            "summary_rejections": self.short_memory.rejection_diagnostics(),
             "pending_summary_jobs": pending, "groups": [{"scope": scope,
                 "listening": self.short_memory.stats(scope), "short_summaries": len(self.short_memory.summaries(scope)),
                 "index_generation": self.apps[scope].index.generation if scope in self.apps else None,

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from myatri_bridge.short_memory import ShortMemory
+from myatri_bridge.short_memory import EvidenceError, ShortMemory
 from myatri_bridge.topics import select_summaries
 
 
@@ -31,8 +31,10 @@ def test_interaction_keeps_original_quote_and_attribution_in_context():
 @pytest.mark.parametrize("kind", ["joke", "open_thread", "emotional_cue"])
 def test_temporary_interaction_cannot_be_promoted_to_personal_claim(kind):
     item = {**interaction(), "interaction_kind": kind, "attribution": "self_report", "subject_id": "a"}
-    with pytest.raises(ValueError, match="transient interaction"):
+    with pytest.raises(EvidenceError) as error:
         ShortMemory._validate_items({"items": [item]}, [{"message_id": "m1", "sender_id": "a", "text": "给月亮打工"}])
+    assert error.value.code == "transient_personal_claim"
+    assert error.value.field == "interaction_kind"
 
 
 def test_rich_projection_stays_bounded_and_does_not_merge_same_named_people():

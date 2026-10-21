@@ -159,14 +159,17 @@ class Event:
 def plugin_callback():
     # Execute the actual callback with only AstrBot's UI surface stubbed out.
     path = Path(__file__).resolve().parents[1] / "astrbot_plugin_myatri/main.py"
-    cls = next(node for node in ast.parse(path.read_text(encoding="utf-8")).body
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "delivery_error_code")
+    cls = next(node for node in tree.body
                if isinstance(node, ast.ClassDef) and node.name == "MyatriPlugin")
     method = next(node for node in cls.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "group_message")
     method.decorator_list = []
-    namespace = {"asyncio": asyncio, "datetime": datetime, "timezone": timezone,
+    import time
+    namespace = {"asyncio": asyncio, "datetime": datetime, "timezone": timezone, "time": time, "httpx": httpx,
                  "logger": logging.getLogger("bubbles-test"), "Plain": Plain, "At": At, "Reply": Reply,
                  "AstrMessageEvent": Event}
-    exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), namespace)
+    exec(compile(ast.Module(body=[helper, method], type_ignores=[]), str(path), "exec"), namespace)
     return namespace["group_message"]
 
 
@@ -182,7 +185,8 @@ async def test_plugin_sends_in_order_and_stops_on_ambiguous_failure(bridge, mess
             result = await bridge.claim(message.key)
         else:
             ack = DeliveryAck.model_validate(body)
-            result = await bridge.acknowledge(message.key, ack.status, ack.part_index)
+            result = await bridge.acknowledge(message.key, ack.status, ack.part_index,
+                reason_code=ack.reason_code, elapsed_seconds=ack.elapsed_seconds)
         return httpx.Response(200, json=result)
 
     async with httpx.AsyncClient(base_url="http://127.0.0.1", transport=httpx.MockTransport(handler)) as client:
@@ -196,6 +200,9 @@ async def test_plugin_sends_in_order_and_stops_on_ambiguous_failure(bridge, mess
         assert event.attempted == 2  # A repeat callback never resends a partial or completed batch.
     with closing(sqlite3.connect(bridge.path)) as db:
         status, count = db.execute("SELECT status,sent_parts FROM deliveries WHERE id=?", (message.key,)).fetchone()
+        telemetry = db.execute("SELECT status,reason_code,elapsed_seconds FROM delivery_events ORDER BY id").fetchall()
     assert status == ("unknown" if fail_second else "sent")
     assert count == (1 if fail_second else 2)
+    assert len(telemetry) == 2 and all(row[2] >= 0 for row in telemetry)
+    assert telemetry[-1][1] == ("send_error" if fail_second else None)
     assert len(provider.requests) == 1

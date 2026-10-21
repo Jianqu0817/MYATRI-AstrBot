@@ -419,8 +419,8 @@ wheels = [
 
 [[package]]
 name = "myatri"
-version = "0.2.7"
-source = { path = "vendor/myatri-0.2.7-py3-none-any.whl" }
+version = "0.2.8"
+source = { path = "vendor/myatri-0.2.8-py3-none-any.whl" }
 dependencies = [
     { name = "httpx" },
     { name = "igraph" },
@@ -433,7 +433,7 @@ dependencies = [
     { name = "tzdata" },
 ]
 wheels = [
-    { filename = "myatri-0.2.7-py3-none-any.whl", hash = "sha256:50dddb50412dd6fb41a154d1e35fa6e59d11c37302ae6edded42c13d1181da6f" },
+    { filename = "myatri-0.2.8-py3-none-any.whl", hash = "sha256:b013f28e9fb8932ccf8b997e7deabd33786a180ebe99c03f5323c99e9d47f5cc" },
 ]
 
 [package.optional-dependencies]
@@ -460,7 +460,7 @@ provides-extras = ["neural"]
 
 [[package]]
 name = "myatri-astrbot-bridge"
-version = "0.2.7"
+version = "0.2.8"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -479,7 +479,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.11.18,<4" },
     { name = "httpx", specifier = ">=0.28,<1" },
-    { name = "myatri", extras = ["neural"], path = "vendor/myatri-0.2.7-py3-none-any.whl" },
+    { name = "myatri", extras = ["neural"], path = "vendor/myatri-0.2.8-py3-none-any.whl" },
 ]
 
 [package.metadata.requires-dev]

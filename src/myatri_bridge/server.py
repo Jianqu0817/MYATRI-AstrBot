@@ -8,18 +8,28 @@ from pathlib import Path
 import tomllib
 
 from aiohttp import web
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from typing import Literal
 
 from myatri.app import load_config
 from myatri.providers import ProviderError
 from .bridge import Bridge, Conflict, Incoming
+from .health import DELIVERY_REASONS
 
 
 class DeliveryAck(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     status: Literal["sent", "unknown"]
     part_index: int | None = Field(default=None, ge=0, le=2)
+    reason_code: str | None = Field(default=None, max_length=40)
+    elapsed_seconds: float | None = Field(default=None, ge=0, le=3600, allow_inf_nan=False)
+
+    @field_validator("reason_code")
+    @classmethod
+    def known_reason(cls, value):
+        if value is not None and value not in DELIVERY_REASONS:
+            raise ValueError("unsupported delivery reason")
+        return value
 
 
 class RuntimeControl(BaseModel):
@@ -73,7 +83,8 @@ def create_app(bridge, token):
     async def acknowledge(request):
         body = DeliveryAck.model_validate(await request.json())
         return web.json_response(
-            await bridge.acknowledge(request.match_info["key"], body.status, body.part_index)
+            await bridge.acknowledge(request.match_info["key"], body.status, body.part_index,
+                reason_code=body.reason_code, elapsed_seconds=body.elapsed_seconds)
         )
 
     async def reload_runtime(request):
@@ -83,6 +94,10 @@ def create_app(bridge, token):
     async def clear_runtime_context(request):
         body = RuntimeControl.model_validate(await request.json())
         return web.json_response(await bridge.clear_runtime_context(body.scope))
+
+    async def retry_summaries(request):
+        body = RuntimeControl.model_validate(await request.json())
+        return web.json_response(await bridge.retry_summaries(body.scope))
 
     async def cleanup(app):
         await bridge.close()
@@ -97,6 +112,7 @@ def create_app(bridge, token):
             web.get("/v1/diagnostics", diagnostics),
             web.post("/v1/admin/reload", reload_runtime),
             web.post("/v1/admin/clear-context", clear_runtime_context),
+            web.post("/v1/admin/retry-summaries", retry_summaries),
             web.post("/v1/messages", messages),
             web.post("/v1/deliveries/{key}/claim", claim),
             web.post("/v1/deliveries/{key}/ack", acknowledge),
