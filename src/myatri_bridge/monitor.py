@@ -1,4 +1,4 @@
-"""Read-only, loopback-only context telemetry. No model or bridge credentials."""
+"""Loopback telemetry and guarded runtime settings. No model calls or client credentials."""
 from __future__ import annotations
 
 import argparse
@@ -7,14 +7,18 @@ from contextlib import closing
 from datetime import datetime, timezone
 import json
 import math
+import hmac
 from pathlib import Path
 import sqlite3
+import secrets
 import time
 import tomllib
 import webbrowser
 
 from aiohttp import web
 from .health import health_snapshot
+from .monitor_stats import daily_usage, job_state, memory_state, merge_daily
+from .control_proxy import runtime_settings_proxy
 
 
 def _read_config(path):
@@ -97,7 +101,8 @@ def _latency_view(value):
     return result
 
 
-def read_library(path, label, config, *, key):
+def read_library(path, label, config, *, key, now=None, subsystem_cache=None):
+    now = now or datetime.now(timezone.utc)
     options = config.get("context", {})
     result = {"key": key, "label": label, "configured_context_limit": options.get("limit"),
         "compaction_threshold": options.get("compact_at"),
@@ -106,6 +111,14 @@ def read_library(path, label, config, *, key):
         "last_conversation_completed_at": None}
     result["context_composition"] = None
     runtime = path / "runtime.sqlite3"
+    cache_key = str(path.resolve())
+    cached = subsystem_cache.get(cache_key) if subsystem_cache is not None else None
+    if cached is None:
+        cached = {"daily_usage": daily_usage(runtime, now), "memory": memory_state(path, config, now),
+                  "maintenance": job_state(runtime, now), "sampled_at": now.isoformat()}
+        if subsystem_cache is not None:
+            subsystem_cache[cache_key] = cached
+    result.update(cached)
     if not runtime.exists():
         return result
     try:
@@ -161,7 +174,8 @@ def _budget(path, limit):
     return result
 
 
-def snapshot(project):
+def snapshot(project, *, now=None, subsystem_cache=None):
+    now = now or datetime.now(timezone.utc)
     project = Path(project).resolve()
     settings = _read_config(project / "config/bridge.local.toml").get("bridge", {})
     engine = _read_config(project / settings.get("engine_config", "config/engine.toml"))
@@ -174,16 +188,8 @@ def snapshot(project):
         groups = [p for p in sorted(state.iterdir()) if p.is_dir() and (p / "runtime.sqlite3").exists()
                   and (p / "domains").exists()]
         for index, group in enumerate(groups, 1):
-            libraries.append(read_library(group, f"微信群聊 {index}", engine, key=f"group-{index}"))
-    core = project.parent / "MYATRI"
-    private_config = _read_config(core / "config/live.local.toml")
-    defaults = _read_config(core / "config/defaults.toml")
-    merged = {**defaults, **private_config,
-        "context": {**defaults.get("context", {}), **private_config.get("context", {})}}
-    for folder, title in (("xiaowennuan", "小温暖私聊"), ("myatri-main", "ATRI旧私聊")):
-        path = core / "var" / folder
-        if (path / "runtime.sqlite3").exists():
-            libraries.append(read_library(path, title, merged, key=folder))
+            libraries.append(read_library(group, f"微信群聊 {index}", engine, key=f"group-{index}",
+                now=now, subsystem_cache=subsystem_cache))
     pending, summaries, listening = [], None, None
     short = state / "short-memory.sqlite3"
     if short.exists():
@@ -200,19 +206,23 @@ def snapshot(project):
                 listening = db.execute("SELECT COALESCE(SUM(total),0) FROM listening_state").fetchone()[0]
         except sqlite3.Error:
             pass
-    return {"updated_at": datetime.now(timezone.utc).isoformat(), "refresh_seconds": 2,
+    return {"updated_at": now.isoformat(), "refresh_seconds": 2, "subsystem_refresh_seconds": 15,
+        "daily_usage": merge_daily([lib["daily_usage"] for lib in libraries], now),
         "libraries": libraries, "group_daily_budget": _budget(state / "budget.sqlite3",
             engine.get("budget", {}).get("daily_tokens")),
         "listening": {"messages": listening, "summaries": summaries, "pending": pending},
         "health": health_snapshot(state),
         "measurement": "API确认的最近一次请求用量；生成中不提供逐Token读数。缓存命中仍占上下文；每日累计不等于单次上下文。",
-        "privacy": "只读本机计数，不读取或返回聊天正文、密钥、推理文本或账号ID。"}
+        "privacy": "只读AstrBot本机统计与情绪投影；不返回聊天正文、密钥、推理文本或账号ID。"}
 
 
 def create_monitor_app(project):
     cached = None
     cached_at = 0.0
     lock = asyncio.Lock()
+    subsystem_cache = {}
+    subsystem_bucket = None
+    session = secrets.token_urlsafe(32)
 
     @web.middleware
     async def local_only(request, handler):
@@ -225,8 +235,13 @@ def create_monitor_app(project):
             raise web.HTTPForbidden()
         if request.headers.get("Sec-Fetch-Site") == "cross-site":
             raise web.HTTPForbidden()
-        if request.method != "GET":
-            raise web.HTTPMethodNotAllowed(request.method, ["GET"])
+        control = request.path in {"/api/runtime-settings","/api/computer-tasks"}
+        if request.method != "GET" and not (request.method == "POST" and control):
+            raise web.HTTPMethodNotAllowed(request.method, ["GET", "POST"] if control else ["GET"])
+        if control and not hmac.compare_digest(request.cookies.get("monitor_control_session", ""), session):
+            raise web.HTTPForbidden()
+        if request.method == "POST" and (origin != f"http://{request.host}" or request.headers.get("X-Monitor-Control") != "1"):
+            raise web.HTTPForbidden()
         response = await handler(request)
         response.headers.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
@@ -234,20 +249,60 @@ def create_monitor_app(project):
         return response
 
     async def metrics(request):
-        nonlocal cached, cached_at
+        nonlocal cached, cached_at, subsystem_bucket
         async with lock:
             if cached is None or time.monotonic() - cached_at >= 2:
-                cached = await asyncio.to_thread(snapshot, project)
+                now = datetime.now(timezone.utc)
+                bucket = int(now.timestamp()) // 15
+                if bucket != subsystem_bucket:
+                    subsystem_cache.clear()
+                    subsystem_bucket = bucket
+                cached = await asyncio.to_thread(snapshot, project, now=now, subsystem_cache=subsystem_cache)
                 cached_at = time.monotonic()
         return web.json_response(cached)
 
     async def index(request):
-        return web.Response(text=Path(__file__).with_name("monitor.html").read_text(encoding="utf-8"),
+        response = web.Response(text=Path(__file__).with_name("monitor.html").read_text(encoding="utf-8"),
                             content_type="text/html")
+        response.set_cookie("monitor_control_session", session, httponly=True, samesite="Strict")
+        return response
 
-    app = web.Application(middlewares=[local_only])
+    async def runtime_settings(request):
+        payload = None
+        if request.method == "POST":
+            if request.content_type != "application/json":
+                raise web.HTTPUnsupportedMediaType()
+            try:
+                from .server import RuntimeSettingsUpdate
+                payload = RuntimeSettingsUpdate.model_validate(await request.json()).model_dump()
+            except (ValueError, TypeError):
+                raise web.HTTPBadRequest() from None
+        data, status = await runtime_settings_proxy(project, payload)
+        return web.json_response(data, status=status)
+
+    app = web.Application(middlewares=[local_only], client_max_size=4096)
+    async def computer_tasks(request):
+        payload=None
+        if request.method=='POST':
+            if request.content_type!='application/json':
+                raise web.HTTPUnsupportedMediaType()
+            try:
+                from .server import ComputerTaskControl
+                payload=ComputerTaskControl.model_validate(await request.json()).model_dump()
+            except (ValueError,TypeError):
+                raise web.HTTPBadRequest() from None
+        identifier=request.query.get('id')
+        if identifier and (len(identifier)!=64 or any(c not in '0123456789abcdef' for c in identifier)):
+            raise web.HTTPBadRequest()
+        data,status=await runtime_settings_proxy(project,payload,task_query=identifier,computer=True)
+        return web.json_response(data,status=status)
+
     app.router.add_get("/", index)
     app.router.add_get("/api/metrics", metrics)
+    app.router.add_get("/api/runtime-settings", runtime_settings)
+    app.router.add_post("/api/runtime-settings", runtime_settings)
+    app.router.add_get('/api/computer-tasks',computer_tasks)
+    app.router.add_post('/api/computer-tasks',computer_tasks)
     return app
 
 

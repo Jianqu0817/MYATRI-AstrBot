@@ -78,7 +78,12 @@ class ReadingConversation(Conversation):
             # Queue ingestion before API wait; user text remains safe if the provider fails.
             if self.on_message:
                 self.on_message(raw)
-            tools = [*READING_TOOLS, *[entry[0] for entry in self.tool_handlers.values()]] if self.enable_tools else []
+            # Build an immutable per-turn view; shared group handler state must
+            # never carry an owner's authority into another member's request.
+            handlers = dict(self.tool_handlers)
+            if getattr(self, "turn_tool_factory", None):
+                handlers.update(self.turn_tool_factory(raw))
+            tools = [*READING_TOOLS, *[entry[0] for entry in handlers.values()]] if self.enable_tools else []
             completed = sum(1 for r in self.store.list_records("raw_message")
                             if r.payload.get("role") == "assistant" and r.payload.get("reply_to"))
             checkpoint = (completed + 1) % self.context.trace_every_turns == 0
@@ -98,6 +103,9 @@ class ReadingConversation(Conversation):
             timings["context_seconds"] = time.perf_counter()-context_started
             preparation = self.context.explain_context().get("preparation_timings", {})
             rules = READING_RULES
+            if "computer_control" in handlers:
+                from .computer_control import RULES
+                rules = rules + "\n" + RULES
             if "web_search" in self.tool_handlers:
                 from .web_tools import WEB_SEARCH_RULES
                 # The tool description covers "how"; this rule covers "when".
@@ -178,8 +186,8 @@ class ReadingConversation(Conversation):
                         if name == "recall":
                             bundle = self.recall.recall(args["query"], snapshot=snapshot, budget=1800)
                             result = recall_directory(bundle, self.store)
-                        elif name in self.tool_handlers:
-                            result = self.tool_handlers[name][1](**args)
+                        elif name in handlers:
+                            result = handlers[name][1](**args)
                             # A blocking backend (e.g. an out-of-process search) must
                             # not stall the loop shared by every group, so async
                             # handlers are awaited and run in their own worker thread.

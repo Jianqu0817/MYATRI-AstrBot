@@ -4,7 +4,7 @@
 
 * :data:`WEB_SEARCH_TOOL` —— 与 ``cold_archive.COLD_TOOL`` 同风格的 schema；
 * :class:`WebSearch` —— 可调用对象，交给 ``conversation.tool_handlers``；
-* :class:`DshBackend` —— 把查询词组交给 DSH 无头子进程并把答案解析成结果行。
+* :class:`SearchBackend` —— 默认由 deepseek_web 直连 Search API，保留 DSH 可选后端。
 
 模块本身默认什么都不做：不构造对象就不读盘、不建表、不起子进程；工具是否注册
 由父进程按配置决定。网页内容一律是不可信材料，这里只做结构校验，不执行任何
@@ -227,6 +227,7 @@ class WebSearch:
         clock: Callable[[], float] = time.time,
         audit_sink: Callable[[dict[str, Any]], None] | None = None,
         logger: logging.Logger | None = None,
+        cache_namespace: str = "",
     ) -> None:
         if type(daily_limit) is not int or daily_limit < 1:
             raise ValueError("daily_limit 必须是正整数")
@@ -247,6 +248,7 @@ class WebSearch:
         self.audit_sink = audit_sink
         self.logger = logger or logging.getLogger(__name__)
         self._clock = clock
+        self.cache_namespace = cache_namespace
         self._rows: list[dict[str, Any]] = []
 
     def search(
@@ -265,6 +267,8 @@ class WebSearch:
         recency = self._require_recency(recency_days)
         query_digest = query_hash_of(text)
         key = cache_key(text, limit, recency)
+        if self.cache_namespace:
+            key = hashlib.sha256(f"{self.cache_namespace}:{key}".encode("utf-8")).hexdigest()
         started = time.monotonic()
         now = float(self._clock())
         try:
@@ -346,11 +350,9 @@ class WebSearch:
         day = _day_key(now)
         with closing(self._connect()) as db, db:
             db.execute("INSERT OR IGNORE INTO web_quota VALUES (?,0)", (day,))
-            row = db.execute("SELECT count FROM web_quota WHERE day=?", (day,)).fetchone()
-            if row is None or int(row[0]) >= self.daily_limit:
-                return False
-            db.execute("UPDATE web_quota SET count=count+1 WHERE day=?", (day,))
-            return True
+            updated = db.execute("UPDATE web_quota SET count=count+1 WHERE day=? AND count<?",
+                                 (day, self.daily_limit))
+            return updated.rowcount == 1
 
     def _fail(self, code: str, query_digest: str, started: float) -> dict[str, Any]:
         self._record(query_digest, started, None, cached=False, error=code)

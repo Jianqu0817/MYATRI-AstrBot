@@ -8,6 +8,8 @@ import time
 
 DELIVERY_REASONS = frozenset({"receipt_timeout", "native_rejected", "binding_unavailable",
     "transport_error", "ack_error", "cancelled", "send_error", "process_restart", "unclassified"})
+SUMMARY_REASONS = frozenset({"invalid_schema", "quote_not_exact", "quote_source_mismatch", "self_report_subject_mismatch",
+    "source_speaker_mismatch", "transient_personal_claim", "unknown_member_id", "item_budget"})
 
 def _connect(path):
     db = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=.3)
@@ -19,6 +21,7 @@ def health_snapshot(root, *, now=None):
     root = Path(root)
     now = time.time() if now is None else now
     result = {"alerts": [], "delivery": {}, "maintenance": {}, "available": True}
+    result["summary_quarantine"] = {"total": None, "by_reason": {}}
 
     def alert(code, severity, count, message):
         result["alerts"].append({"code": code, "severity": severity, "count": count, "message": message})
@@ -34,6 +37,13 @@ def health_snapshot(root, *, now=None):
                 parked = db.execute("SELECT COUNT(*) FROM listening_pending WHERE needs_attention=1").fetchone()[0] if "needs_attention" in columns else 0
                 tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 rejected = db.execute("SELECT COUNT(*) FROM listening_rejections").fetchone()[0] if "listening_rejections" in tables else 0
+                if "listening_rejections" in tables:
+                    columns = {row[1] for row in db.execute("PRAGMA table_info(listening_rejections)")}
+                    reasons = Counter()
+                    if "code" in columns:
+                        for code, count in db.execute("SELECT code,COUNT(*) FROM listening_rejections GROUP BY code"):
+                            reasons[code if code in SUMMARY_REASONS else "other"] += count
+                    result["summary_quarantine"] = {"total": rejected, "by_reason": dict(reasons)}
             if count and not summaries:
                 alert("summary_no_success", "error", count, "旁听已有积压，但尚无成功摘要。")
             if repeated:
@@ -41,7 +51,7 @@ def health_snapshot(root, *, now=None):
             if parked:
                 alert("summary_needs_attention", "error", parked, "摘要修复仍失败，已暂停自动调用；处理原因后可显式重试。")
             if rejected:
-                alert("summary_candidates_quarantined", "warning", rejected, "摘要中有未通过校验的候选已隔离，未作为事实写入。")
+                alert("summary_candidates_quarantined", "warning", rejected, "历史摘要候选已隔离保留，未作为事实写入；不自动改身份或引文放行。")
         except sqlite3.Error:
             result["available"] = False
 
@@ -75,12 +85,28 @@ def health_snapshot(root, *, now=None):
             result["available"] = False
 
     failed, deferred, unconfirmed = 0, 0, 0
+    failure_codes, recovery = Counter(), Counter()
     for path in root.glob("*/runtime.sqlite3"):
         try:
             with closing(_connect(path)) as db:
                 tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 if "jobs" in tables:
                     failed += db.execute("SELECT COUNT(*) FROM jobs WHERE role='maintenance' AND status='failed'").fetchone()[0]
+                    columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+                    if "error" in columns:
+                        for error, in db.execute("SELECT error FROM jobs WHERE role='maintenance' AND status='failed'"):
+                            text = str(error or "")
+                            code = next((code for pattern, code in (
+                                ("association outside", "association_bounds"), ("group event merge", "member_ownership"),
+                                ("quote outside", "quote_bounds"), ("all A1 candidates", "all_candidates_quarantined"),
+                                ("invalid structured", "structured_output"), ("provider transport", "transport"))
+                                if pattern in text), "other")
+                            failure_codes[code] += 1
+                    if {"id", "error"} <= columns and "schedule" in tables:
+                        from .recovery import VERSION
+                        for status, amount in db.execute("SELECT j.status,COUNT(*) FROM jobs j JOIN schedule s "
+                                "ON s.name='job_recovery:'||j.id||? WHERE j.role='maintenance' GROUP BY j.status", (":"+VERSION,)):
+                            recovery[status if status in {"failed", "succeeded", "retry_wait", "running", "deferred"} else "other"] += amount
                 if "schedule" in tables:
                     for value, in db.execute("SELECT value FROM schedule WHERE name='maintenance_deferred_batches'"):
                         try:
@@ -98,7 +124,8 @@ def health_snapshot(root, *, now=None):
                             result["available"] = False
         except sqlite3.Error:
             result["available"] = False
-    result["maintenance"] = {"failed_jobs": failed, "deferred_batches": deferred, "unconfirmed_candidates": unconfirmed}
+    result["maintenance"] = {"failed_jobs": failed, "deferred_batches": deferred, "unconfirmed_candidates": unconfirmed,
+                             "failure_codes": dict(failure_codes), "automatic_recovery": dict(recovery)}
     if failed:
         alert("maintenance_failed", "error", failed, "存在失败维护任务，等待有限恢复或人工处理。")
     if deferred:

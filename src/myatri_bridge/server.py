@@ -38,6 +38,20 @@ class RuntimeControl(BaseModel):
     scope: str = Field(pattern=r"^[0-9a-f]{32}$")
 
 
+class RuntimeSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    revision: int = Field(ge=0)
+    random_reply_probability: float = Field(ge=0, le=1, allow_inf_nan=False)
+    recovery_enabled: bool
+
+
+class ComputerTaskControl(BaseModel):
+    model_config = ConfigDict(extra='forbid',strict=True)
+    task_id: str = Field(pattern=r'^[0-9a-f]{64}$')
+    action: Literal['pause','resume','cancel']
+    command_id: str = Field(pattern=r'^[0-9a-f]{32}$')
+
+
 class PendingQuery(BaseModel):
     """``GET /v1/deliveries/pending`` 的查询参数，只允许 scope。"""
 
@@ -141,8 +155,30 @@ def create_app(bridge, token):
         body = RuntimeControl.model_validate(await request.json())
         return web.json_response(await bridge.retry_summaries(body.scope))
 
+    async def runtime_settings(request):
+        if request.method == "GET":
+            return web.json_response({"ok": True, **bridge.runtime_settings.read()})
+        body = RuntimeSettingsUpdate.model_validate(await request.json())
+        return web.json_response(await bridge.update_runtime_settings(body.revision,
+            body.random_reply_probability, body.recovery_enabled))
+
     async def cleanup(app):
         await bridge.close()
+
+    async def computer_tasks(request):
+        agent=bridge.computer_agent
+        if not agent.enabled:
+            return web.json_response({'ok':True,'enabled':False,'tasks':[]})
+        if request.method=='POST':
+            body=ComputerTaskControl.model_validate(await request.json())
+            result=agent.control(body.task_id,body.action,body.command_id)
+            return web.json_response({'ok':True,**result})
+        task=request.query.get('id')
+        if task:
+            if len(task)!=64 or any(c not in '0123456789abcdef' for c in task):
+                raise ValueError('invalid_task')
+            return web.json_response({'ok':True,'task':agent.store.details(task)})
+        return web.json_response({'ok':True,'enabled':True,'permission_profile':agent.profile,'tasks':agent.store.list()})
 
     async def startup(app):
         bridge.start()
@@ -155,6 +191,10 @@ def create_app(bridge, token):
             web.post("/v1/admin/reload", reload_runtime),
             web.post("/v1/admin/clear-context", clear_runtime_context),
             web.post("/v1/admin/retry-summaries", retry_summaries),
+            web.get("/v1/admin/runtime-settings", runtime_settings),
+            web.post("/v1/admin/runtime-settings", runtime_settings),
+            web.get('/v1/admin/computer-tasks',computer_tasks),
+            web.post('/v1/admin/computer-tasks',computer_tasks),
             web.post("/v1/messages", messages),
             web.get("/v1/deliveries/pending", pending),
             web.post("/v1/deliveries/{key}/claim", claim),

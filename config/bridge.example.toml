@@ -5,6 +5,9 @@ mode = "offline"
 allowed_groups = [] # Exact "AstrBot platform instance ID|group ID" pairs.
 cooldown_seconds = 8
 random_reply_probability = 0.10 # Per new message; keywords and @ bypass this draw and cooldown.
+# After a mention/name wake, attend to the next 1-4 human messages in this group (10 min expiry).
+attention_followup_enabled = true
+attention_reply_probability = 0.75
 recent_context_messages = 100 # Includes the current message and confirmed bot replies.
 dialogue_turns = 80 # Keep complete confirmed conversations separately from the listening window.
 cold_retention_days = 0 # Optional local compressed originals; 0 keeps the existing 200-message policy.
@@ -22,16 +25,32 @@ engine_config = "config/engine.toml"
 capture_requests = false
 
 # 联网搜索（默认关闭）。开启后每个群独立一个 web.sqlite3 作为缓存与日限额账本。
-# 经由 DeepSeek Harness 无头子进程：每次搜索任务可能包含多次计费请求，运行在只读沙箱内。
+# 默认直连 DeepSeek Search API，复用聊天凭据，不需要 Node 或辅助模型请求。
 [bridge.web]
 enabled = false
-backend = "dsh"
-node_path = "" # 必填：node.exe 绝对路径
-bin_path = "" # 必填：@deepseek-ai/dsh 的 lib/bin.js 绝对路径
+backend = "deepseek-api"
+# 只有显式 backend = "dsh" 时才需要 node_path / bin_path，旧只读封装保留。
 timeout_seconds = 25
 max_results = 3
 daily_limit = 40
 cache_ttl_hours = 24
+
+# First-stage computer actions: only a separately pinned owner account in live mode.
+# Set the same stable owner_id as [bridge], never a display name. Local paths only.
+[bridge.computer]
+enabled = false
+# Separate goal-driven execution LLM; shares the normal daily ledger.
+agent_enabled = false
+permission_profile = "full" # Current Windows account; no path/application/command allowlist.
+native_config = "config/harness/executor.local.json"
+owner_id = ""
+node_path = ""
+runtime_root = ""
+
+# Finite repair of known maintenance failures, using the original shared model budget.
+# Runtime window settings override this startup default and persist locally.
+[bridge.recovery]
+enabled = true
 
 # 主动发言（默认关闭，且默认影子模式：只生成草稿、不发送）。
 # 主动轮不写 role="user" 记录，因此不会进入人类证据链。

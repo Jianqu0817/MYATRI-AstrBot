@@ -1,4 +1,4 @@
-"""Wire the out-of-process web search into the bridge, off by default."""
+"""Wire direct API or explicit legacy DSH search, off by default."""
 from __future__ import annotations
 
 import inspect
@@ -27,11 +27,13 @@ def _message():
     )
 
 
-def _bridge(tmp_path, **web):
+def _bridge(tmp_path, *, responses=None, **web):
+    if "node_path" in web or "bin_path" in web:
+        web.setdefault("backend", "dsh")
     providers = []
 
     def factory(scope):
-        provider = FixtureProvider([{"content": "我先看一眼，等我一下。"}])
+        provider = FixtureProvider(responses or [{"content": "我先看一眼，等我一下。"}])
         providers.append(provider)
         return provider
 
@@ -139,3 +141,45 @@ async def test_search_guidance_is_injected_only_when_enabled(tmp_path, monkeypat
         assert "web_search 工具" not in _system_text(disabled)
     finally:
         await disabled.close()
+
+
+async def test_default_direct_backend_needs_no_node_and_resumes_tool_protocol(tmp_path, monkeypatch):
+    import json
+    import httpx
+    from myatri_bridge.deepseek_web import DeepSeekSearchBackend
+    from myatri.providers.gateway import validate_protocol
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("direct search must not start DSH or read real credentials")
+
+    monkeypatch.setattr("subprocess.Popen", forbidden)
+    monkeypatch.setattr("myatri.credentials.read_deepseek_key", forbidden)
+    bridge = _bridge(tmp_path, enabled=True, responses=[
+        {"content": "", "tool_calls": [{"id": "search_1", "type": "function", "function": {
+            "name": "web_search", "arguments": '{"query":"合成天气"}'}}]},
+        {"content": "来源：https://example.com/weather"},
+    ])
+    try:
+        message = _message()
+        _, search = bridge._web_tool(bridge.root / message.scope)
+        assert isinstance(search.backend, DeepSeekSearchBackend)
+        assert search.backend.allow_network is False  # offline mode always gates real IO
+        search.backend.allow_network = True  # injected mock transport only
+        search.backend.key_resolver = lambda: "fake-credential"
+        search.backend.transport = httpx.MockTransport(lambda _: httpx.Response(200, json={"results": [
+            {"title": "合成天气", "url": "https://example.com/weather", "snippet": "合成晴天"}]}))
+        result = await bridge.receive(message)
+        assert result["status"] == "prepared"
+        provider = bridge.test_providers[0]
+        assert len(provider.requests) == 2
+        messages = provider.requests[-1].messages
+        validate_protocol(messages)
+        tool = next(m for m in messages if m.get("tool_call_id") == "search_1")
+        assert json.loads(tool["content"])["results"][0]["snippet"] == "合成晴天"
+    finally:
+        await bridge.close()
+
+
+def test_unknown_backend_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="web.backend"):
+        _bridge(tmp_path, enabled=True, backend="typo")

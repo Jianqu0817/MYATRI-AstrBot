@@ -7,6 +7,7 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 *.local.toml
+*.local.json
 .env*
 !*.example
 credentials/
