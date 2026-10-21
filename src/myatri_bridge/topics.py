@@ -73,16 +73,17 @@ class TopicTracker:
                 "status": "attention_hint_not_verified_fact"}
 
 
-def select_summaries(summaries, query, sender, *, max_chars=12000):
+def select_summaries(summaries, query, sender, *, max_chars=30000):
     """Bound relevance; carry uncertainty/corrections without inventing freshness."""
     ranked = []
     for summary in summaries:
         for item in summary["items"]:
             row = {key: item[key] for key in ("text", "speaker_id", "subject_id", "attribution", "source_message_ids")}
-            row.update({key: item[key] for key in ("facet", "change", "supersedes_message_ids", "valid_time") if key in item})
+            row.update({key: item[key] for key in ("facet", "change", "supersedes_message_ids", "valid_time", "interaction_kind", "source_quotes") if key in item})
             row.update(window_end=summary["window_end"], created_at=summary["created_at"])
             score = overlap(query, item["text"]) * 5 + (item["subject_id"] == sender)
             score += .5 if any(word in item["text"] for word in ("更正", "不再", "取消", "改为", "约定", "答应")) else 0
+            row["attention_score"] = score
             ranked.append((score, summary["window_end"], row))
     ranked.sort(key=lambda pair: (pair[0], pair[1]), reverse=True)
     selected, used, seen = [], 0, set()

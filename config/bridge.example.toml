@@ -5,8 +5,8 @@ mode = "offline"
 allowed_groups = [] # Exact "AstrBot platform instance ID|group ID" pairs.
 cooldown_seconds = 8
 random_reply_probability = 0.10 # Per new message; keywords and @ bypass this draw and cooldown.
-recent_context_messages = 20 # Includes the current message and confirmed bot replies.
-dialogue_turns = 15 # Keep complete confirmed conversations separately from the listening window.
+recent_context_messages = 100 # Includes the current message and confirmed bot replies.
+dialogue_turns = 80 # Keep complete confirmed conversations separately from the listening window.
 cold_retention_days = 0 # Optional local compressed originals; 0 keeps the existing 200-message policy.
 random_reply_ttl_seconds = 45 # Expire delayed random interjections before delivery.
 memory_review_enabled = true # One support check per summary containing personal claims, never per chat reply.
@@ -19,3 +19,4 @@ engine_config = "config/engine.toml"
 
 # Live mode is a later explicit choice; the model key stays in Windows credentials.
 # The plugin is disabled separately until a real group adapter has been selected.
+capture_requests = false

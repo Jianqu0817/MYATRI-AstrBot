@@ -140,7 +140,10 @@ class NativeClient:
         return response.json()
 
     async def check(self):
-        reader = await self.reader("/api/v1/reader/status")
+        try:
+            reader = await self.reader("/api/v1/reader/status")
+        except httpx.RequestError:
+            raise NotReady("READER_HTTP_UNAVAILABLE") from None
         account, own = reader.get("accountDirectory"), reader.get("ownWxid")
         if (
             reader.get("backend") != "weflow-cli-nt"
@@ -152,7 +155,10 @@ class NativeClient:
             raise NotReady("READER_ACCOUNT_CHANGED")
         if self.bot_id and own != self.bot_id:
             raise NotReady("READER_ACCOUNT_CHANGED")
-        native = await self.native("/WeChatAgent/health")
+        try:
+            native = await self.native("/WeChatAgent/health")
+        except httpx.RequestError:
+            raise NotReady("NATIVE_HTTP_UNAVAILABLE") from None
         if (
             not isinstance(native, dict)
             or native.get("integration") != "WeChatAgent-1"

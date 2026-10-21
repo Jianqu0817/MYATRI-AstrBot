@@ -23,6 +23,9 @@ from astrbot_plugin_myatri.wechatagent_client import (  # noqa: E402
 
 
 HINTS = {
+    "READER_HTTP_UNAVAILABLE": "本机消息读取服务未连接。请运行 Start-WeChat.cmd 或 Start-WeChat-Live.cmd；若启动仍失败，查看 var/reader.stderr.log。单独运行 Check-WeChat.cmd 不会启动读取服务。",
+    "NATIVE_HTTP_UNAVAILABLE": "配套微信接口未连接（默认端口 30001）。请从托盘完整退出普通微信，用 Open-WeChat.cmd 打开配套 4.1.10.27，完成手机确认并进入聊天列表，再启动 Start-WeChat-Live.cmd。直接打开普通微信无法提供该接口。",
+    "HOOK_INITIALIZATION_PENDING": "配套微信接口仍在初始化。请完成手机登录确认并进入聊天列表，稍等后重新启动。",
     "SET_WECHATAGENT_DIRECTORY": "尚未安装并配置 WeChatAgent 的读取/原生发送后端。请先取得可运行后端，再在 config/wechatagent.local.toml 填运行目录。克隆源码不会生成发送 DLL。",
     "WECHATAGENT_RUNTIME_FILES_MISSING": "目录中缺少 state/wechat-io-config.json 或 state/hook/native-token.txt；需要已完成首次配置的 WeChatAgent 运行数据目录。",
     "HOOK_VERSION_MISMATCH": "参考接口只验证了微信 4.1.10.27；不能仅把版本号改成 4.1.15.13。",

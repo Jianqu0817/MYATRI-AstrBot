@@ -5,6 +5,7 @@ import json
 import re
 
 from myatri.persona.temporary import resolve
+from myatri.conversation.serialization import compact_json
 
 
 TOOL_BYTES = 6000
@@ -20,7 +21,7 @@ READING_RULES = (
 
 def byte_size(value):
     # Same serialization as the outgoing tool message, including JSON escapes.
-    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    return len(compact_json(value).encode("utf-8"))
 
 
 def recall_directory(bundle, store):

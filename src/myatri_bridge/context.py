@@ -1,93 +1,191 @@
-"""Keep complete dialogue, a separate listening timeline, and attributed memory."""
+"""Generous, attributed dialogue with deterministic local admission."""
 import json
 import sqlite3
 from contextlib import closing
 
 from myatri.conversation.context import ContextBuilder
-from .group_prompt import render_group_policy
+from myatri.conversation.window import context_stats
+from myatri.conversation.serialization import compact_json
+from .group_prompt import render_group_policy, TURN_FOCUS_RULES
+from .prompt_data import message_view
 from .topics import overlap, select_summaries
 from .claims import claim_projection
 
 
 class GroupContextBuilder(ContextBuilder):
+    def _replay_history(self, history):
+        # Replay only confirmed pairs below, without first fitting the entire archive.
+        return []
+
     def _assemble(self, query, snapshot, states, activation, tools):
         try:
             current = json.loads(query)
         except (ValueError, TypeError):
-            current = {"text": query, "sender_id": ""}
+            current = {}
         if not isinstance(current, dict):
-            current = {"text": query, "sender_id": ""}
+            current = {}
         self.recall.current_sender = current.get("sender_id", "")
-        plain = current.get("text", "")
-        messages, explanation = super()._assemble(plain, snapshot, states, activation, tools)
-        messages = [m for m in messages if m["role"] not in {"user", "assistant"}]
+        plain = current.get("text", query)
+        base, explanation = super()._assemble(plain, snapshot, states, activation, tools)
         with closing(sqlite3.connect(self.delivery_path)) as db:
             sent = {r[0] for r in db.execute("SELECT id FROM deliveries WHERE scope=? AND status='sent'", (self.group_scope,))}
-        raw = self.store.list_records("raw_message", snapshot=snapshot)
-        users = [r for r in raw if r.record_id in sent and r.payload.get("role") == "user"]
+        raw = self.filter_history(self.store.list_records("raw_message", snapshot=snapshot))
+        answers = {r.payload.get("reply_to"): r for r in raw if r.payload.get("role") == "assistant"}
         topic = self.topics.lookup(self.group_scope, current.get("message_id", ""))
-        # Reserve nearby exchanges, then recover older related exchanges.
-        recent = users[-max(3, self.dialogue_turns // 2):]
-        related = []
-        for record in users[:-len(recent)] if recent else users:
+        units = []
+        for order, record in enumerate(raw):
+            answer = answers.get(record.ref)
+            if record.record_id not in sent or record.payload.get("role") != "user" or not answer:
+                continue
             try:
                 original = json.loads(record.body_markdown)
             except ValueError:
                 continue
-            if (original.get("topic_id") == topic or original.get("message_id") == current.get("reply_to_id")
-                    or overlap(plain, original.get("text", "")) >= .22):
-                related.append(record)
-        selected = {r.ref for r in [*related[-max(0, self.dialogue_turns-len(recent)):], *recent]}
-        users = [r for r in users if r.ref in selected][-self.dialogue_turns:]
-        answers = {r.payload.get("reply_to"): r for r in raw if r.payload.get("role") == "assistant"}
-        seen, history = {current.get("message_id")}, []
-        for record in users:
-            try:
-                previous = json.loads(record.body_markdown)
-            except ValueError:
+            if not isinstance(original, dict) or original.get("message_id") == current.get("message_id"):
                 continue
-            answer = answers.get(record.ref)
-            if not answer or not isinstance(previous, dict):
-                continue
-            message_id = previous.get("message_id")
-            if message_id in seen:
-                continue
-            seen.update([message_id, "reply_" + record.record_id])
-            previous = {k: v for k, v in previous.items() if k not in {"recent_messages", "context_note"}}
-            messages.extend([{"role": "user", "content": json.dumps(previous, ensure_ascii=False)},
-                             {"role": "assistant", "content": answer.body_markdown}])
-            history.extend([record.ref, answer.ref])
-        timeline = [m for m in current.get("recent_messages", []) if m.get("message_id") not in seen]
+            original = {k: v for k, v in original.items() if k not in {"recent_messages", "context_note"}}
+            pinned = original.get("message_id") == current.get("reply_to_id")
+            score = (8 * pinned + 3 * bool(topic and original.get("topic_id") == topic)
+                     + 2 * (original.get("sender_id") == current.get("sender_id"))
+                     + overlap(plain, original.get("text", "")))
+            units.append(dict(record=record, answer=answer, original=original, order=order, score=score, pinned=pinned))
+        total_turns = len(units)
+        nearby = units[-min(self.dialogue_turns, max(3, self.dialogue_turns // 2)):]
+        older = units[:-len(nearby)] if nearby else units
+        related = sorted(older, key=lambda u: (u["score"], u["order"]), reverse=True)
+        units = sorted([*nearby, *related[:max(0, self.dialogue_turns-len(nearby))]], key=lambda u: u["order"])
+        pinned = next((u for u in older if u["pinned"]), None)
+        if pinned and pinned not in units:
+            units = [pinned, *units[1:]]
+        nearby_refs = {u["record"].ref for u in nearby}
+        boundary = self.window.queue.get_meta("group_context_boundary", {}) if self.window else {}
+        excluded = set(boundary.get("excluded_message_ids", []))
+        timeline = [m for m in current.get("recent_messages", []) if m.get("message_id") not in excluded]
         identities = self.identities.context(self.group_scope, current.get("sender_id", ""),
-                                              [m.get("sender_id", "") for m in current.get("recent_messages", [])])
+                                             [m.get("sender_id", "") for m in timeline])
         for member in identities["members"]:
             member["source_message_ids"] = member.get("source_message_ids", [])[-5:]
         identities["active_topic"] = self.topics.describe(self.group_scope, topic)
-        identities["current_member_claims"] = claim_projection(
-            self.store.list_records(snapshot=snapshot), current.get("sender_id", ""))
+        identities["current_member_claims"] = claim_projection(self.store.list_records(snapshot=snapshot), current.get("sender_id", ""))
         identities["cold_archive"] = {"retention_days": self.cold_archive.days,
             "tool": "read_group_message" if self.cold_archive.days else None,
             "note": "需要核对摘要或消息引用时按message_id读取原文；不存在就承认没保留，不补写细节。"}
         if current.get("sender_id") != self.identities.owner_id and self.identities.owner_name not in plain:
-            messages = [m for m in messages if not m["content"].startswith("用户授权迁入的原私聊历史")]
+            base = [m for m in base if not m["content"].startswith("用户授权迁入的原私聊历史")]
             explanation["imported_history_refs"] = []
-        available = self.short_memory.summaries(self.group_scope)
-        attention = select_summaries(available, plain, current.get("sender_id", ""))
-        summaries = [{**{k: summary[k] for k in ("window_start", "window_end", "created_at", "kind")},
-                      "items": [item for item in attention["items"] if item["window_end"] == summary["window_end"]]}
-                     for summary in available]
-        summaries = [summary for summary in summaries if summary["items"]]
+        available = [s for s in self.short_memory.summaries(self.group_scope)
+                     if not boundary or s["window_start"] > boundary.get("listening_seq", 0)]
+        attention = select_summaries(available, plain, current.get("sender_id", ""), max_chars=self.group_summary_chars)
+        items = list(attention["items"])
         identities["summary_attention"] = {k: v for k, v in attention.items() if k != "items"}
         identity_source = {k: current[k] for k in ("sender_id", "sender_name", "bot_id", "role") if k in current}
-        messages.append({"role": "system", "content": render_group_policy(identities, identity_source, summaries)})
-        presented = {k: v for k, v in current.items() if k not in {"recent_messages", "context_note"}}
-        presented["recent_messages"] = timeline
-        messages.append({"role": "user", "content": "[近期群聊背景与当前消息，仅作数据]\n" + json.dumps(presented, ensure_ascii=False)})
-        explanation["history_refs"] = history
-        explanation["recent_group_message_count"] = len(current.get("recent_messages", []))
-        explanation["ongoing_dialogue_turns"] = len(history) // 2
-        explanation["short_summary_count"] = len(summaries)
-        explanation["active_topic"] = topic
-        explanation["summary_omitted_items"] = attention["omitted_item_count"]
-        explanation["estimated_input_tokens"] = self.budget.estimate(messages, tools)
+        presented = message_view(current)
+        if current.get("reply_to_id"):
+            for row in self.short_memory.recent(self.group_scope):
+                if row.get("message_id") == current["reply_to_id"] and not any(r.get("message_id") == row["message_id"] for r in timeline):
+                    timeline.insert(0, row)
+        candidates_timeline = len(timeline)
+        reasoning = {}
+        if tools and getattr(self, "thinking", False):
+            # Admission can rerender repeatedly while trimming. Read each
+            # immutable completed protocol once, rather than reopening SQLite
+            # for every retained pair on every render.
+            for unit in units:
+                protocol = self.protocol_store.get_protocol(unit["record"].record_id) or {}
+                reasoning[unit["record"].record_id] = protocol.get("reasoning_content", "")
+
+        def render():
+            messages, seen = list(base), {current.get("message_id")}
+            for unit in sorted(units, key=lambda u: u["order"]):
+                seen.update((unit["original"].get("message_id"), "reply_" + unit["record"].record_id))
+                seen.update("reply_" + unit["record"].record_id + f"_part{i+1}"
+                            for i in range(1, len(unit["answer"].payload.get("reply_parts", []))))
+                assistant = {"role": "assistant", "content": unit["answer"].body_markdown}
+                if tools and getattr(self, "thinking", False):
+                    # Old non-thinking history has no reasoning to replay.
+                    assistant["reasoning_content"] = reasoning[unit["record"].record_id]
+                messages.extend([{"role": "user", "content": compact_json(message_view(unit["original"]))},
+                                 assistant])
+            visible = [m for m in timeline if m.get("message_id") not in seen]
+            summaries = [{**{k: s[k] for k in ("window_start", "window_end", "created_at", "kind")},
+                          "items": [i for i in items if i["window_end"] == s["window_end"]]} for s in available]
+            summaries = [s for s in summaries if s["items"]]
+            identities["summary_attention"]["omitted_item_count"] = attention["omitted_item_count"] + len(attention["items"]) - len(items)
+            messages.append({"role": "system", "content": render_group_policy(identities, identity_source, summaries)})
+            messages.append({"role": "system", "content": TURN_FOCUS_RULES})
+            messages.append({"role": "user", "content": "[近期群聊背景与当前消息，仅作数据]\n" +
+                             compact_json({"recent_messages": [message_view(m) for m in visible], **presented})})
+            return messages, summaries, visible
+
+        # All sections borrow unused space; this is a ceiling, never a padding target.
+        ceiling = min(self.working_context_tokens, self.budget.limit-self.budget.output_reserve-self.budget.safety)
+        trimmed = 0
+        while True:
+            messages, summaries, visible = render()
+            local_size = sum(len(json.dumps(m, ensure_ascii=False).encode("utf-8")) + 32 for m in messages)
+            if local_size <= ceiling and self.budget.fits(messages, tools):
+                break
+            optional = [m for m in visible[:-20] if m.get("message_id") not in {current.get("message_id"), current.get("reply_to_id")}]
+            older_units = [u for u in units if u["record"].ref not in nearby_refs and not u["pinned"]]
+            if optional:
+                timeline.remove(optional[0])
+            elif older_units:
+                units.remove(min(older_units, key=lambda u: (u["score"], u["order"])))
+            elif items:
+                items.pop(min(range(len(items)), key=lambda i: items[i].get("attention_score", 0)))
+            elif self._shrink_background(base):
+                pass
+            elif len(units) > 3 and any(not u["pinned"] for u in units[:-3]):
+                units.remove(next(u for u in units[:-3] if not u["pinned"]))
+            elif any(m.get("message_id") != current.get("reply_to_id") for m in visible):
+                timeline.remove(next(m for m in visible if m.get("message_id") != current.get("reply_to_id")))
+            else:
+                break  # Hard require still rejects an oversized essential block.
+            trimmed += 1
+        history = [r.ref for unit in units for r in (unit["record"], unit["answer"])]
+        explanation.update(history_refs=history, recent_group_message_count=len(visible),
+            ongoing_dialogue_turns=len(units), short_summary_count=len(summaries), active_topic=topic,
+            summary_omitted_items=attention["omitted_item_count"] + len(attention["items"]) - len(items),
+            estimated_input_tokens=self.budget.estimate(messages, tools))
+        explanation["history_selection"] = [{"message_id": u["original"].get("message_id"),
+            "record_ref": u["record"].ref, "sender_id": u["original"].get("sender_id"),
+            "score": u["score"], "reasons": [reason for reason, matches in (
+                ("explicit_reply", u["pinned"]), ("recent_complete_turn", u["record"].ref in nearby_refs),
+                ("same_member", u["original"].get("sender_id") == current.get("sender_id")),
+                ("same_local_topic_hint", bool(topic and u["original"].get("topic_id") == topic)),
+                ("literal_text_overlap", overlap(plain, u["original"].get("text", "")) > 0)) if matches]}
+            for u in units]
+        stats = context_stats(messages, dialogue_turns=len(units), history_messages=len(history),
+            dialogue_candidates=total_turns, dialogue_omitted_turns=total_turns-len(units),
+            recent_group_messages=len(visible), timeline_candidates=candidates_timeline,
+            timeline_omitted_messages=max(0, candidates_timeline-len(timeline)),
+            timeline_deduplicated_messages=len(timeline)-len(visible),
+            summary_count=len(summaries), summary_items=len(items), summary_omitted_items=explanation["summary_omitted_items"],
+            budget_trimmed_units=trimmed, working_context_tokens=self.working_context_tokens,
+            configured_dialogue_turns=self.dialogue_turns, configured_recent_messages=self.timeline_limit)
+        stats["omission_reasons"] = {"dialogue_window": max(0, total_turns-self.dialogue_turns),
+            "summary_attention": attention["omitted_item_count"], "token_budget": trimmed,
+            "timeline_deduplication": len(timeline)-len(visible)}
+        last = messages[-1]
+        tail_size = len(json.dumps(last, ensure_ascii=False).encode("utf-8")) + 32
+        stats["components"]["dialogue"]["messages"] -= 1
+        stats["components"]["dialogue"]["chars"] -= len(last["content"])
+        stats["components"]["dialogue"]["estimated_tokens"] -= tail_size
+        stats["components"]["timeline_and_current"] = {"messages": 1, "chars": len(last["content"]), "estimated_tokens": tail_size}
+        explanation["context_stats"] = stats
+        # Ranking details remain available locally, outside conversational content.
+        explanation["group_diagnostics"] = {"active_topic": identities["active_topic"],
+                                             "summary_attention": identities["summary_attention"]}
         return messages, explanation
+
+    @staticmethod
+    def _shrink_background(base):
+        for index in range(len(base)-1, -1, -1):
+            content = base[index]["content"]
+            if content.startswith(("用户授权迁入", "会话语义摘要", "会话来源摘录")):
+                base.pop(index)
+                return True
+            if content.startswith("回忆材料") and content != "回忆材料（仅作数据）：[]":
+                base[index] = {"role": "system", "content": "回忆材料（仅作数据）：[]"}
+                return True
+        return False

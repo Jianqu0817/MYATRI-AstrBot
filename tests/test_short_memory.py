@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from myatri.providers import FixtureProvider, Gateway
-from myatri_bridge.short_memory import ShortMemory
+from myatri_bridge.short_memory import PROMPT_VERSION, ShortMemory
 
 
 def message(number, *, sender="member1", text="我喜欢红茶", **extra):
@@ -262,7 +262,7 @@ async def test_callback_failure_reuses_validated_result_without_second_api_call(
     assert original_window[0]["text"] == "我喜欢红茶"
     assert summary["generator"]["provider"] == "fixture"
     assert summary["generator"]["model"] == "offline-fixture-v1"
-    assert summary["generator"]["prompt_version"] == "group-listening-v1"
+    assert summary["generator"]["prompt_version"] == PROMPT_VERSION
     assert summary["generator"]["run_id"].startswith("listening_")
     assert memory.summaries("room")[0] == summary
     assert memory.stats("room")["pending_summaries"] == 2

@@ -19,7 +19,7 @@ from myatri.contracts import ModelRequest
 
 
 ATTRIBUTIONS = ["self_report", "reported", "uncertain", "conversation"]
-PROMPT_VERSION = "group-listening-v1"
+PROMPT_VERSION = "group-listening-v2"
 SUMMARY_MAX_TOKENS = 8000
 SUMMARY_REPAIR_MAX_TOKENS = 12000
 
@@ -75,6 +75,7 @@ ITEM_SCHEMA = {
         "change": {"enum": ["assertion", "correction", "retraction"]},
         "supersedes_message_ids": {"type": "array", "maxItems": 10, "uniqueItems": True, "items": {"type": "string"}},
         "valid_time": {"type": ["string", "null"], "maxLength": 100},
+        "interaction_kind": {"enum": ["topic", "joke", "open_thread", "relationship_boundary", "emotional_cue", "other"]},
     },
 }
 SUMMARY_SCHEMA = {
@@ -98,8 +99,12 @@ SYSTEM_PROMPT = (
     "assistant_context只是已经确认发出的机器人回复，帮助理解成员的简短回应；它不是人类的新证据，不能引用为成员自述。"
     "quoted_message是成员引用的资料，未经同群真实原话匹配不能认证引用对象或增加其自述；不要把引用文字归给本次发言者。"
     "输出精炼JSON，不写Markdown、分析或重复解释。合并同一成员同一事实的重复表达；不同成员、否定、"
-    "更正、承诺和重要时间限定不可为省字混在一起或删去。每项text通常不超过80字，引用只选足够证明结论的"
-    "最短逐字片段，通常不超过60字；不要整段复制聊天。不适用的可选字段直接省略。"
+    "更正、承诺和重要时间限定不可为省字混在一起或删去。每项text通常80—200字，也可以更短；不要为了精炼删掉互动的前因后果。"
+    "除事实外也保留正在延续的话题、共同玩笑、尚未结束的回应、明确表达的交往边界与当时语气，"
+    "可用interaction_kind标明类型；这些用conversation或uncertain，不升级为永久个人事实。"
+    "情绪只写原话明确表达的当时状态，不推断潜意识、依恋关系或现实心理诊断。"
+    "保留足够理解语境的关键逐字原话，通常40—160字；不要无关地整段复制聊天。"
+    "机器人说过什么只从assistant_context理解，不作为人类新证据。不适用的可选字段直接省略。"
 )
 
 
@@ -312,6 +317,9 @@ class ShortMemory:
                 raise ValueError("self-report subject must equal the original speaker")
             if item["attribution"] in {"self_report", "reported"} and not subject:
                 raise ValueError("asserted personal summary requires a known subject")
+            if (item.get("interaction_kind") in {"joke", "open_thread", "emotional_cue"}
+                    and item["attribution"] not in {"conversation", "uncertain"}):
+                raise ValueError("transient interaction must not become a personal claim")
             quotes = item["source_quotes"]
             if {quote["message_id"] for quote in quotes} != set(refs):
                 raise ValueError("every summary source requires an original quote")

@@ -73,7 +73,8 @@ async def run(args):
     try:
         first = make_event("real-plugin-1")
         await plugin.group_message(first)
-        assert first.is_stopped() and len(first.sent) == 1
+        assert first.is_stopped() and 1 <= len(first.sent) <= 3
+        assert all("<|msg|>" not in part.text for sent in first.sent for part in sent.chain if isinstance(part, Plain))
         duplicate = make_event("real-plugin-1")
         await plugin.group_message(duplicate)
         assert duplicate.is_stopped() and not duplicate.sent
@@ -115,9 +116,11 @@ async def run(args):
         assert native_event.get_sender_id() == "wxid_group_member"
         assert native_event.message_obj.timestamp == native_payload["timestamp"]
         await plugin.group_message(native_event)
-        assert native_event.is_stopped() and len(captured_native) == 1
+        assert native_event.is_stopped() and 1 <= len(captured_native) <= 3
+        assert all("<|msg|>" not in text for text in captured_native)
+        native_count = len(captured_native)
         await plugin.group_message(platform.event(native_payload))
-        assert len(captured_native) == 1
+        assert len(captured_native) == native_count
         print(
             json.dumps(
                 {

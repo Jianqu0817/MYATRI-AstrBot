@@ -38,6 +38,12 @@ try {
     foreach ($servicePort in @(5031,6185,8766)) {
         if (Get-NetTCPConnection -State Listen -LocalPort $servicePort -ErrorAction SilentlyContinue) { throw ('Close the previous service on port '+$servicePort+' before starting.') }
     }
+    $wechatSettings = & .\.venv\Scripts\python.exe -c "from astrbot_plugin_myatri.wechatagent_client import Settings; from urllib.parse import urlsplit; s=Settings.load('config/wechatagent.local.toml'); print(urlsplit(s.native_url).port or 80)"
+    if ($LASTEXITCODE -ne 0) { throw 'WeChat settings could not be loaded. See docs/WeChatAgent接入.md.' }
+    $nativePort = [int]$wechatSettings
+    if (-not (Get-NetTCPConnection -State Listen -LocalPort $nativePort -ErrorAction SilentlyContinue)) {
+        throw ('WeChat native backend (127.0.0.1:'+$nativePort+') is not running. Exit WeChat from its tray, open Open-WeChat.cmd, finish login, then retry this launcher.')
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $workspace 'state/weflow/WeFlow-config.json'))) { throw 'Run Setup-WeChat.cmd once to bind the reader to your account.' }
     $distribution = Get-Content -LiteralPath (Join-Path $workspace 'config/distribution.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $readerScript = Join-Path $workspace 'scripts/reader-api.py'

@@ -44,6 +44,9 @@ async def bridge(tmp_path):
         "allowed_groups": ["fixture|room1", "fixture|room2"],
         "cooldown_seconds": 0,
         "random_reply_probability": 0,
+        # Legacy transport fixtures deliberately exercise the old window.
+        "recent_context_messages": 20,
+        "dialogue_turns": 15,
     }
     instance = Bridge(
         tmp_path / "groups",

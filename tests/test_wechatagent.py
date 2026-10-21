@@ -152,6 +152,30 @@ async def test_stable_binding_survives_group_rename():
         await client.close()
 
 
+@pytest.mark.parametrize(
+    "failed_path,code",
+    [
+        ("/api/v1/reader/status", "READER_HTTP_UNAVAILABLE"),
+        ("/WeChatAgent/health", "NATIVE_HTTP_UNAVAILABLE"),
+    ],
+)
+async def test_health_connection_failure_identifies_the_failed_service(failed_path, code):
+    working, calls = backend()
+
+    async def handler(request):
+        if request.url.path == failed_path:
+            raise httpx.ConnectError("connection refused", request=request)
+        return await working.handle_async_request(request)
+
+    client = NativeClient(settings(), transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(NotReady, match=f"^{code}$"):
+            await client.bind()
+        assert not any(r.method == "POST" for r in calls)
+    finally:
+        await client.close()
+
+
 async def test_event_identity_time_wake_and_rejection():
     transport, _ = backend()
     client = NativeClient(settings(), transport=transport)

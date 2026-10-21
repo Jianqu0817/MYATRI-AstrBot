@@ -4,6 +4,7 @@ import sqlite3
 from aiohttp.test_utils import TestClient, TestServer
 
 from myatri_bridge.monitor import create_monitor_app, read_library, snapshot
+from myatri_bridge.monitor import _context_view
 
 
 def library(tmp_path):
@@ -89,6 +90,17 @@ def test_reasoning_count_uses_provider_field_only(tmp_path):
     assert result["latest_conversation"]["reasoning_tokens"] == 90
 
 
+def test_configured_thinking_and_actual_effort_keep_unknown_old_rows(tmp_path):
+    root = library(tmp_path)
+    add_usage(root, 500, thinking_enabled=True, reasoning_effort="high")
+    result = read_library(root, "测试", {"chat": {"thinking": True}}, key="test")
+    assert result["default_thinking_enabled"] is True
+    assert result["latest_conversation"]["reasoning_effort"] == "high"
+    add_usage(root, 500, reasoning_effort=["malformed"])
+    result = read_library(root, "测试", {}, key="test")
+    assert result["latest_conversation"]["reasoning_effort"] is None
+
+
 def test_malformed_old_usage_is_skipped_and_busy_data_stays_unknown(tmp_path):
     root = library(tmp_path)
     with sqlite3.connect(root / "runtime.sqlite3") as db:
@@ -96,3 +108,35 @@ def test_malformed_old_usage_is_skipped_and_busy_data_stays_unknown(tmp_path):
     assert read_library(root, "测试", {}, key="test")["latest_conversation"] is None
     (root / "runtime.sqlite3").write_bytes(b"not a database")
     assert read_library(root, "测试", {}, key="test")["status"] == "temporarily_unavailable"
+
+
+def test_composition_allowlist_rejects_text_ids_boolean_and_nonfinite_values(tmp_path):
+    root = library(tmp_path)
+    add_usage(root, 20000)
+    stats = {"version": 1, "dialogue_turns": 80, "recent_group_messages": 100,
+        "history_messages": True, "summary_items": float("inf"), "api_key": "SECRET KEY",
+        "components": {"dialogue": {"messages": 160, "chars": 30000, "estimated_tokens": 90000,
+                                      "content": "SECRET CHAT", "sender_id": "wxid_secret"},
+                       "SECRET CATEGORY": {"messages": 1}},
+        "omission_reasons": {"dialogue_window": 20, "token_budget": "SECRET TOKEN", "sender_id": "wxid_secret"}}
+    with sqlite3.connect(root / "runtime.sqlite3") as db:
+        db.execute("INSERT INTO protocols VALUES(?)", (json.dumps({"status": "completed",
+            "replied_at": "2026-10-21T12:00:00+08:00", "context_stats": stats}),))
+    view = read_library(root, "测试", {}, key="test")["context_composition"]
+    assert view["dialogue_turns"] == 80 and view["recent_group_messages"] == 100
+    assert view["history_messages"] is None and view["summary_items"] is None
+    assert view["components"] == {"dialogue": {"messages": 160, "chars": 30000, "estimated_tokens": 90000}}
+    assert view["omission_reasons"] == {"dialogue_window": 20, "token_budget": None}
+    encoded = json.dumps(view, allow_nan=False)
+    assert not any(secret in encoded for secret in ("SECRET", "wxid_secret", "sender_id", "api_key"))
+    assert _context_view({"version": True}) is None
+
+
+def test_malformed_nested_usage_and_nondict_protocol_do_not_crash_monitor(tmp_path):
+    root = library(tmp_path)
+    add_usage(root, 100, usage={"prompt_tokens": 100, "completion_tokens_details": [], "prompt_tokens_details": "bad"})
+    with sqlite3.connect(root / "runtime.sqlite3") as db:
+        db.execute("INSERT INTO protocols VALUES(?)", ("[]",))
+    result = read_library(root, "测试", {}, key="test")
+    assert result["status"] == "ok"
+    assert result["latest_conversation"]["prompt_tokens"] == 100

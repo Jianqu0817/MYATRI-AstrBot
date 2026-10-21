@@ -23,6 +23,7 @@ class MyatriPlugin(Star):
         self.config = config
         self.client = None
         self.inflight = set()
+        self.delivery_locks = {}
 
     async def initialize(self):
         url = self.config.get("bridge_url", "http://127.0.0.1:8766").rstrip("/")
@@ -123,17 +124,24 @@ class MyatriPlugin(Star):
             if result.get("status") != "prepared":
                 return
             delivery_id = result["id"]
-            claim = await self.client.post(f"/v1/deliveries/{delivery_id}/claim")
-            claim.raise_for_status()
-            if not claim.json().get("claimed"):
-                return
-            claimed = True
-            # Direct send is intentional: stop_event has already closed the pipeline.
-            await event.send(event.plain_result(result["reply"]))
-            ack = await self.client.post(
-                f"/v1/deliveries/{delivery_id}/ack", json={"status": "sent"}
-            )
-            ack.raise_for_status()
+            replies = result.get("reply_parts", [result["reply"]])
+            if (not isinstance(replies, list) or not 1 <= len(replies) <= 3
+                    or any(not isinstance(text, str) or not text.strip() for text in replies)):
+                raise ValueError("invalid reply parts")
+            async with self.delivery_locks.setdefault(route, asyncio.Lock()):
+                claim = await self.client.post(f"/v1/deliveries/{delivery_id}/claim")
+                claim.raise_for_status()
+                if not claim.json().get("claimed"):
+                    return
+                claimed = True
+                # Hold the route lock for the whole batch. The WeChat adapter
+                # awaits its receipt before event.send returns; do not resend on timeout.
+                for index, text in enumerate(replies):
+                    await event.send(event.plain_result(text))
+                    ack = await self.client.post(
+                        f"/v1/deliveries/{delivery_id}/ack", json={"status": "sent", "part_index": index}
+                    )
+                    ack.raise_for_status()
         except (Exception, asyncio.CancelledError) as exc:
             logger.warning("MYATRI bridge stopped this reply: %s", type(exc).__name__)
             if claimed:

@@ -64,7 +64,8 @@ async def test_two_rooms_are_isolated_but_members_share_room_context(bridge, mes
     assert len(first_app.store.list_records("raw_message")) == 4
     assert len(second_app.store.list_records("raw_message")) == 2
     contexts = bridge.test_providers[0].requests[-1].messages
-    assert any('"sender_id": "member1"' in m["content"] for m in contexts)
+    current = json.loads(contexts[-1]["content"].split("\n", 1)[1])
+    assert any(row["sender_id"] == "member1" for row in current["recent_messages"])
     assert not any("另一个群的消息" in m["content"] for m in contexts)
     assert first_app.gateway.budget_ledger is second_app.gateway.budget_ledger
     assert first_app.gateway.budget_scope == second_app.gateway.budget_scope

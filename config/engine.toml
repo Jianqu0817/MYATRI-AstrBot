@@ -3,6 +3,12 @@ endpoint = "https://api.deepseek.com"
 model = "deepseek-flash"
 allow_paid = false
 capabilities_verified = true
+# Conversation only. DeepSeek low/high/max: high is the middle tier (medium maps to high).
+thinking = true
+reasoning_effort = "high"
+# Combined reasoning + answer ceiling, not a target or a separate reasoning cap.
+thinking_max_tokens = 8192
+thinking_timeout = 120
 
 [embedding]
 backend = "auto" # Use the verified local BGE model when present; otherwise TF-IDF.
@@ -20,12 +26,12 @@ output_per_million = 0.0
 enabled = false
 
 [context]
-# Chat body: aim for 40-80 non-space characters; local hard maximum, no rewrite API.
-reply_min_chars = 40
-reply_max_chars = 80
-reply_max_tokens = 512
+# Natural chat: usually 20-100 chars; local fallback cap 160, no rewrite API.
+reply_min_chars = 20
+reply_max_chars = 160
+reply_max_tokens = 1024
 trace_every_turns = 30
-recall_budget_chars = 8000
+recall_budget_chars = 50000
 timezone = "Asia/Shanghai"
 
 limit = 1000000
@@ -36,6 +42,18 @@ compaction_chunk_bytes = 200000
 compaction_max_chunks = 16
 llm_compaction = true
 llm_activation = false
+reply_target_max_chars = 100
+recall_excerpt_chars = 4000
+summary_budget_bytes = 60000
+imported_history_budget_bytes = 96000
+recent_history_turns = 80
+recent_history_bytes = 240000
+compaction_detail_items = 24
+compaction_detail_chars = 600
+compaction_output_tokens = 8000
+working_context_tokens = 200000
+group_summary_chars = 30000
+capture_requests = false
 
 [emotion]
 enabled = true
