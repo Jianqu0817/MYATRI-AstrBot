@@ -20,10 +20,42 @@ from myatri.contracts import ModelRequest
 
 ATTRIBUTIONS = ["self_report", "reported", "uncertain", "conversation"]
 PROMPT_VERSION = "group-listening-v1"
+SUMMARY_MAX_TOKENS = 8000
+SUMMARY_REPAIR_MAX_TOKENS = 12000
 
 
 class InputTooLarge(ValueError):
     """A complete fixed window cannot fit; preserve it for explicit repair."""
+
+
+class IncompleteSummary(ValueError):
+    """Reject incomplete output even when a stub gateway skips validation."""
+
+
+def _failure_details(exc, stage, max_tokens):
+    """Only persist enumerated codes, never exception text or model output."""
+    import jsonschema
+    code = "unexpected_error"
+    if isinstance(exc, InputTooLarge):
+        code = "input_too_large"
+    elif isinstance(exc, IncompleteSummary) or str(exc) == "incomplete response: length":
+        code = "output_length"
+    elif isinstance(exc, json.JSONDecodeError) or isinstance(exc.__cause__, json.JSONDecodeError):
+        code = "invalid_json"
+    elif isinstance(exc, jsonschema.ValidationError) or isinstance(exc.__cause__, jsonschema.ValidationError):
+        code = "invalid_schema"
+    elif str(exc) == "invalid structured result; no changes submitted":
+        code = "invalid_structure"
+    elif getattr(exc, "reason", None) in {"daily_limit", "request_size"}:
+        code = "budget_" + exc.reason
+    elif type(exc).__name__ == "ProviderError":
+        code = "provider_error"
+    elif isinstance(exc, (TimeoutError, ConnectionError)):
+        code = "transport_error"
+    elif isinstance(exc, ValueError):
+        code = "evidence_validation" if stage in {"validate", "review", "cached_validate"} else "invalid_data"
+    return {"stage": stage, "code": code, "exception_type": type(exc).__name__,
+            "max_tokens": max_tokens if stage == "generate" else None}
 
 
 ITEM_SCHEMA = {
@@ -65,6 +97,9 @@ SYSTEM_PROMPT = (
     "valid_time只记录原话明确的有效时间，不把消息发送时间当事情发生时间。"
     "assistant_context只是已经确认发出的机器人回复，帮助理解成员的简短回应；它不是人类的新证据，不能引用为成员自述。"
     "quoted_message是成员引用的资料，未经同群真实原话匹配不能认证引用对象或增加其自述；不要把引用文字归给本次发言者。"
+    "输出精炼JSON，不写Markdown、分析或重复解释。合并同一成员同一事实的重复表达；不同成员、否定、"
+    "更正、承诺和重要时间限定不可为省字混在一起或删去。每项text通常不超过80字，引用只选足够证明结论的"
+    "最短逐字片段，通常不超过60字；不要整段复制聊天。不适用的可选字段直接省略。"
 )
 
 
@@ -104,6 +139,8 @@ class ShortMemory:
             """)
             if "result" not in {row[1] for row in db.execute("PRAGMA table_info(listening_pending)")}:
                 db.execute("ALTER TABLE listening_pending ADD COLUMN result TEXT")
+            if "error_details" not in {row[1] for row in db.execute("PRAGMA table_info(listening_pending)")}:
+                db.execute("ALTER TABLE listening_pending ADD COLUMN error_details TEXT")
 
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=10)
@@ -213,6 +250,19 @@ class ShortMemory:
                     "SELECT DISTINCT scope FROM listening_pending WHERE next_attempt<=?", (time.time(),))]
             return [row[0] for row in db.execute("SELECT DISTINCT scope FROM listening_pending")]
 
+    def pending_diagnostics(self, scope=None):
+        """Read bounded job metadata without exposing source text or raw errors."""
+        query = "SELECT scope,end_seq,attempts,next_attempt,last_error,error_details,result IS NOT NULL FROM listening_pending"
+        args = ()
+        if scope is not None:
+            query += " WHERE scope=?"
+            args = (scope,)
+        with closing(self._connect()) as db:
+            return [{"scope": row[0], "window_end": row[1], "attempts": row[2],
+                     "next_attempt": row[3], "error_type": row[4],
+                     "details": json.loads(row[5]) if row[5] else None, "draft_cached": bool(row[6])}
+                    for row in db.execute(query + " ORDER BY scope,end_seq LIMIT 100", args)]
+
     def _request_window(self, messages, scope=None):
         included, omitted = [], []
         size = 0
@@ -285,19 +335,24 @@ class ShortMemory:
             now = time.time()
             with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
-                row = db.execute("SELECT end_seq,payload,attempts,next_attempt,result FROM listening_pending "
+                row = db.execute("SELECT end_seq,payload,attempts,next_attempt,result,error_details FROM listening_pending "
                                  "WHERE scope=? AND next_attempt<=? ORDER BY end_seq LIMIT 1",
                                  (scope, now)).fetchone()
                 if not row:
                     retry_at = db.execute("SELECT MIN(next_attempt) FROM listening_pending WHERE scope=?",
                                           (scope,)).fetchone()[0]
                     return {"status": "idle"} if retry_at is None else {"status": "deferred", "retry_at": retry_at}
-                end_seq, encoded, attempts, _, saved_result = row
+                end_seq, encoded, attempts, _, saved_result, saved_error = row
                 # Claim first, before releasing the DB lock or making paid IO.
                 next_attempt = now + max(self.retry_seconds, 600)
                 db.execute("UPDATE listening_pending SET attempts=attempts+1,next_attempt=? "
                            "WHERE scope=? AND end_seq=?", (next_attempt, scope, end_seq))
+            stage = "load_window"
+            max_tokens = SUMMARY_MAX_TOKENS
             try:
+                previous_error = json.loads(saved_error) if saved_error else {}
+                if previous_error.get("code") == "output_length":
+                    max_tokens = SUMMARY_REPAIR_MAX_TOKENS
                 source_messages = json.loads(encoded)
                 if not isinstance(source_messages, list) or len(source_messages) != self.summary_every:
                     raise ValueError("fixed listening source window is incomplete")
@@ -305,6 +360,7 @@ class ShortMemory:
                 run_id = "listening_" + hashlib.sha256(
                     json.dumps([scope, end_seq], ensure_ascii=False).encode()).hexdigest()[:32]
                 if saved_result:
+                    stage = "cached_validate"
                     summary = json.loads(saved_result)
                     self._validate_items({"items": summary["items"]}, source_messages)
                     if (summary.get("scope") != scope or summary.get("window_end") != end_seq
@@ -316,15 +372,20 @@ class ShortMemory:
                 else:
                     if not window["complete"]:
                         raise InputTooLarge("complete listening window exceeds configured input limit")
+                    stage = "generate"
                     request = ModelRequest(
                         role="background", purpose="group_short_memory", prompt_version=PROMPT_VERSION,
                         messages=[{"role": "system", "content": SYSTEM_PROMPT},
                                   {"role": "user", "content": json.dumps(window, ensure_ascii=False)}],
-                        output_schema=SUMMARY_SCHEMA, max_tokens=3500,
+                        output_schema=SUMMARY_SCHEMA, max_tokens=max_tokens, thinking=False,
                         budget_tokens=self.max_input_chars * 4 + 20000, timeout=90,
                     )
                     response = await gateway.generate(request)
+                    if response.finish_reason == "length":
+                        raise IncompleteSummary("incomplete summary output")
+                    stage = "decode"
                     value = json.loads(response.content)
+                    stage = "validate"
                     self._validate_items(value, source_messages)
                     prior_claims = window["prior_claims"] + value["items"]
                     for item in value["items"]:
@@ -348,12 +409,14 @@ class ShortMemory:
                         db.execute("UPDATE listening_pending SET result=? WHERE scope=? AND end_seq=?",
                                    (json.dumps(summary, ensure_ascii=False), scope, end_seq))
                 if reviewer is not None and "review" not in summary:
+                    stage = "review"
                     summary = await reviewer(summary, source_messages, gateway)
                     self._validate_items({"items": summary["items"]}, source_messages)
                     with closing(self._connect()) as db, db:
                         db.execute("UPDATE listening_pending SET result=? WHERE scope=? AND end_seq=?",
                                    (json.dumps(summary, ensure_ascii=False), scope, end_seq))
                 if on_summary is not None:
+                    stage = "archive"
                     # Give the archive callback independent copies so it cannot
                     # mutate the summary/source data used by subsequent validation.
                     outcome = on_summary(json.loads(json.dumps(summary)), json.loads(encoded))
@@ -361,6 +424,7 @@ class ShortMemory:
                         if inspect.iscoroutine(outcome):
                             outcome.close()
                         raise TypeError("on_summary must be a synchronous archive callback")
+                stage = "commit"
                 with closing(self._connect()) as db, db:
                     db.execute("INSERT OR REPLACE INTO listening_summaries VALUES (?,?,?)",
                                (scope, end_seq, json.dumps(summary, ensure_ascii=False)))
@@ -370,15 +434,16 @@ class ShortMemory:
                                "ORDER BY end_seq DESC LIMIT ?)", (scope, scope, self.summary_limit))
                 return {"status": "summarized", "window_end": end_seq, "item_count": len(summary["items"])}
             except Exception as exc:
+                details = _failure_details(exc, stage, max_tokens)
                 delay = min(86400, self.retry_seconds * 2 ** min(attempts, 6))
                 retry_at = time.time() + delay
                 with closing(self._connect()) as db, db:
-                    db.execute("UPDATE listening_pending SET next_attempt=?,last_error=? "
+                    db.execute("UPDATE listening_pending SET next_attempt=?,last_error=?,error_details=? "
                                "WHERE scope=? AND end_seq=?",
-                               (retry_at, type(exc).__name__, scope, end_seq))
+                               (retry_at, type(exc).__name__, json.dumps(details), scope, end_seq))
                 return {"status": "failed", "window_end": end_seq,
                         "error": "input_too_large" if isinstance(exc, InputTooLarge) else type(exc).__name__,
-                        "retry_at": retry_at}
+                        "retry_at": retry_at, "diagnostic": details}
 
     def flush(self, scope=None):
         """Promote partial batches without altering the new-message summary counter."""

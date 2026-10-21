@@ -25,6 +25,7 @@ from .topics import TopicTracker
 from .cold_archive import ColdArchive, COLD_TOOL
 from .memory_review import review_summary
 from .reply_guard import ReplyGuard
+from .reading_conversation import ReadingConversation
 
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,7 @@ class Bridge:
                 embedding_provider=self.embedding_provider,
             )
             self.embedding_provider = app.index.provider
+            app.conversation = ReadingConversation.adapt(app.conversation)
             # Group budgets share a ledger; no multiplication of the daily allowance.
             app.gateway.budget_ledger = self.budget
             app.gateway.budget_scope = "astrbot-all-groups"

@@ -1,0 +1,137 @@
+"""Bridge-local adapter for the frozen myatri 0.2.0 conversation protocol.
+
+respond mirrors vendor 0.2.0, with bounded model projections, read coverage and
+lightweight audits. Keep retry/idempotency/budget/checkpoint semantics aligned
+when updating that dependency. No changes to site-packages or the core checkout.
+"""
+from copy import deepcopy
+import json
+
+import jsonschema
+
+from myatri.contracts import ModelRequest
+from myatri.conversation.engine import Conversation, TOOLS
+from myatri.providers.gateway import ProviderError, assistant_message, validate_protocol
+from .tool_reading import (READING_RULES, FIELDS, cold_page, guard_reading_claim, read_audit,
+                           read_page, recall_directory)
+
+
+READING_TOOLS = deepcopy(TOOLS)
+READING_TOOLS[0]["function"]["description"] = "搜索记忆目录；摘录不是已读原文，用read_record读取精确版本"
+reader = READING_TOOLS[1]["function"]
+reader["description"] = "分页读取精确ID@revision；按read_progress.first_unread_offset补缺页，末页不代表读完"
+reader["parameters"]["properties"]["ref"]["maxLength"] = 256
+reader["parameters"]["properties"]["field"] = {"type": "string", "enum": list(FIELDS)}
+
+
+class ReadingConversation(Conversation):
+    @classmethod
+    def adapt(cls, conversation):
+        # Transfer the already constructed hooks, context, lock and shared
+        # budgets without reinitializing runtime state or changing its class.
+        adapted = cls.__new__(cls)
+        adapted.__dict__.update(conversation.__dict__)
+        return adapted
+
+    async def respond(self, text, *, message_id=None, metadata=None):
+        async with self._lock:
+            if metadata is not None and not isinstance(metadata, dict):
+                raise ValueError("message metadata must be a dict")
+            if metadata and set(metadata) & {"role", "content", "message_id"}:
+                raise ValueError("message metadata cannot override the conversation identity")
+            raw = self.store.append_message("user", text, message_id=message_id, **(metadata or {}))
+            try:
+                answer = self.store.get_record("answer_" + raw.record_id)
+            except KeyError:
+                pass
+            else:
+                if self.on_answer:
+                    self.on_answer(answer)
+                return answer
+            # Queue ingestion before API wait; user text remains safe if the provider fails.
+            if self.on_message:
+                self.on_message(raw)
+            tools = [*READING_TOOLS, *[entry[0] for entry in self.tool_handlers.values()]] if self.enable_tools else []
+            completed = sum(1 for r in self.store.list_records("raw_message")
+                            if r.payload.get("role") == "assistant" and r.payload.get("reply_to"))
+            checkpoint = (completed + 1) % self.context.trace_every_turns == 0
+            saved = self.protocol_store.get_protocol(raw.record_id) if self.protocol_store else None
+            if saved and saved["status"] == "active":
+                messages, snapshot, start_step = saved["messages"], saved["snapshot"], saved["steps"]
+                validate_protocol(messages)
+            else:
+                messages, snapshot = await self.context.abuild_context(text, tools=tools, persist_activation=checkpoint)
+                start_step = 0
+            if not any(m.get("role") == "system" and m.get("content") == READING_RULES for m in messages):
+                messages.insert(0, {"role": "system", "content": READING_RULES})
+            for step in range(start_step, self.max_steps):
+                reply_policy = self.context.reply_policy
+                output_tokens = self.context.budget.output_reserve
+                if reply_policy.maximum:
+                    output_tokens = min(output_tokens, reply_policy.max_tokens)
+                request = ModelRequest(messages=messages, tools=tools, role="foreground", purpose="conversation",
+                                       budget_tokens=self.context.budget.limit, max_tokens=output_tokens,
+                                       estimated_input_tokens=self.context.budget.estimate(messages, tools))
+                self.context.budget.require(messages, tools)
+                response = await self.gateway.generate(request)
+                self.context.budget.calibrate(messages, response.usage, tools)
+                if self.protocol_store and checkpoint:
+                    self.protocol_store.set_meta("context_token_anchor", self.context.budget.anchor)
+                if not response.tool_calls:
+                    if self.reply_guard is not None:
+                        checked = await self.reply_guard(response.content, raw, messages)
+                        response = response.model_copy(update={"content": checked})
+                    guarded, reading_guard = guard_reading_claim(response.content, read_audit(messages))
+                    response = response.model_copy(update={"content": reply_policy.prepare(guarded)})
+                    if not response.content:
+                        raise ProviderError("empty reply after metadata removal; raw user message preserved")
+                messages.append(assistant_message(response))
+                if not response.tool_calls:
+                    validate_protocol(messages)
+                    answer = self.store.append_message("assistant", response.content,
+                        message_id="answer_" + raw.record_id, reply_to=raw.ref,
+                        provider=response.provider, model=response.model, context_snapshot=snapshot,
+                        reading_guard=reading_guard,
+                        **({"quality_review": self.reply_guard.last_check} if self.reply_guard is not None
+                           and hasattr(self.reply_guard, "last_check") else {}))
+                    if self.protocol_store:
+                        protocol = {"status": "completed", "snapshot": snapshot,
+                            "steps": step+1, "reply_ref": answer.ref, "sent_at": raw.created_at,
+                            "replied_at": answer.created_at, "full_checkpoint": checkpoint,
+                            "tool_audit": read_audit(messages), "reading_guard": reading_guard}
+                        if checkpoint:
+                            protocol["messages"] = messages
+                            protocol["context"] = self.context.explain_context()
+                        self.protocol_store.save_protocol(raw.record_id, protocol)
+                    if checkpoint:
+                        self.store.flush_projection()
+                    if self.on_answer:
+                        self.on_answer(answer)
+                    return answer
+                for call in response.tool_calls:
+                    try:
+                        name = call["function"]["name"]
+                        definition = next(t["function"] for t in tools if t["function"]["name"] == name)
+                        args = json.loads(call["function"]["arguments"])
+                        jsonschema.validate(args, definition["parameters"])
+                        if name == "recall":
+                            bundle = self.recall.recall(args["query"], snapshot=snapshot, budget=1800)
+                            result = recall_directory(bundle, self.store)
+                        elif name in self.tool_handlers:
+                            result = self.tool_handlers[name][1](**args)
+                            if name == "read_group_message":
+                                result = cold_page(result, args["message_id"], read_audit(messages))
+                        else:
+                            result = read_page(self.store, args["ref"], snapshot, read_audit(messages),
+                                offset=args.get("offset", 0), limit=args.get("limit", 800), field=args.get("field"))
+                        # Bounded result, without truncating JSON/protocol fields.
+                        encoded = json.dumps(result, ensure_ascii=False)
+                        if len(encoded.encode("utf-8")) > 6000:
+                            result = {"error": "record exceeds tool result budget", "ref": args.get("ref"), "suggestion": "use recall with narrower query"}
+                    except (ValueError, KeyError, StopIteration, jsonschema.ValidationError) as exc:
+                        result = {"error": type(exc).__name__, "message": "tool arguments or source invalid"}
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False)})
+                if self.protocol_store:
+                    self.protocol_store.save_protocol(raw.record_id, {"status": "active", "snapshot": snapshot,
+                        "steps": step+1, "messages": messages, "tool_audit": read_audit(messages)})
+            raise ProviderError("tool step limit reached; raw user message preserved, no fictitious reply committed")
