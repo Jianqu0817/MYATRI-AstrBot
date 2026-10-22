@@ -94,6 +94,11 @@ class ReadingConversation(Conversation):
                 raise ProviderError("turn belongs to a cleared context; use a new message ID")
             delegated = ('computer_control' in handlers and 'instructions' in
                          handlers['computer_control'][0]['function']['parameters'].get('properties', {}))
+            from .computer_control import command_body, explicit_computer_query, ComputerTaskPending
+            source_text = raw.payload.get('channel_source', {}).get('text', '')
+            command = command_body(source_text)
+            delegation_required = delegated and ((command is not None and command.startswith('任务 '))
+                                                 or explicit_computer_query(source_text))
             if self.enable_tools and "computer_control" in handlers and not delegated:
                 # /pc is already an exact, owner-bound host command. Dispatch it
                 # once without asking the chat model whether it has this ability.
@@ -128,6 +133,27 @@ class ReadingConversation(Conversation):
                 messages, snapshot = await self.context.abuild_context(text, tools=tools, persist_activation=checkpoint)
                 turn_stats = deepcopy(self.context.explain_context().get("context_stats", {}))
                 start_step = 0
+            # Resume the original call, never a separate report-generation chat.
+            # Re-dispatch is idempotent: the source message fixes the task ID and
+            # an existing task returns its persisted state without repeating effects.
+            waiting = saved.get('computer_wait') if saved else None
+            if waiting:
+                if 'computer_control' not in handlers:
+                    result = {'error': 'computer_owner_required'}
+                else:
+                    result = await handlers['computer_control'][1](**waiting['arguments'])
+                for item in messages:
+                    if item.get('role') == 'tool' and item.get('tool_call_id') == waiting['call_id']:
+                        item['content'] = compact_json(result)
+                        break
+                else:
+                    raise ProviderError('computer continuation missing its tool call')
+                pending = result.get('task_id') and result.get('state') in {'queued', 'running', 'pausing', 'cancelling'}
+                self.protocol_store.save_protocol(raw.record_id, {'status': 'active', 'snapshot': snapshot,
+                    'steps': start_step, 'messages': messages, 'context_stats': turn_stats,
+                    **({'computer_wait': waiting} if pending else {})})
+                if pending:
+                    raise ComputerTaskPending(result['task_id'])
             timings["context_seconds"] = time.perf_counter()-context_started
             preparation = self.context.explain_context().get("preparation_timings", {})
             rules = READING_RULES
@@ -171,7 +197,7 @@ class ReadingConversation(Conversation):
                 self.context.budget.calibrate(messages, response.usage, tools)
                 if self.protocol_store and checkpoint:
                     self.protocol_store.set_meta("context_token_anchor", self.context.budget.anchor)
-                if delegated and not delegation_attempted and not task_submitted and not response.tool_calls:
+                if delegation_required and not delegation_attempted and not task_submitted and not response.tool_calls:
                     # One explicit correction, preserving the main model's role
                     # as delegator instead of silently substituting host prose.
                     if step > start_step:
@@ -179,7 +205,7 @@ class ReadingConversation(Conversation):
                     messages.append(assistant_message(response))
                     messages.append({'role': 'system', 'content':
                         '当前已核验用户明确提交电脑任务。请生成instructions并调用computer_control委派Harness，'
-                        '不能只回复做不到或声称已接单。宿主将按原始用户目标核验身份，任务完成后会让你汇报。'})
+                        '不能只回复做不到或声称已接单。工具返回实际执行报告后，再回答用户。'})
                     continue
                 if not response.tool_calls:
                     if self.reply_guard is not None:
@@ -217,7 +243,7 @@ class ReadingConversation(Conversation):
                             # Provider protocol data, never character memory. Needed
                             # when a later tools-enabled request replays this answer.
                             protocol["reasoning_content"] = response.provider_fields.get("reasoning_content", "")
-                        if checkpoint:
+                        if checkpoint or delegation_calls or task_submitted:
                             protocol["messages"] = messages
                             protocol["context"] = self.context.explain_context()
                         self.protocol_store.save_protocol(raw.record_id, protocol)
@@ -227,6 +253,7 @@ class ReadingConversation(Conversation):
                         self.on_answer(answer)
                     return answer
                 tools_started = time.perf_counter()
+                computer_wait = None
                 for call in response.tool_calls:
                     try:
                         name = call["function"]["name"]
@@ -237,6 +264,21 @@ class ReadingConversation(Conversation):
                             bundle = self.recall.recall(args["query"], snapshot=snapshot, budget=1800)
                             result = recall_directory(bundle, self.store)
                         elif name in handlers:
+                            if name == 'computer_control' and delegated:
+                                if len(response.tool_calls) != 1:
+                                    raise ValueError('computer delegation must be a single tool call')
+                                if step+1 >= self.max_steps or not self.protocol_store:
+                                    raise ValueError('computer delegation requires a resumable final step')
+                                computer_wait = {'call_id': call['id'], 'arguments': args}
+                                # Save the call BEFORE submitting an execution task.
+                                # A crash between submission and dispatch completion
+                                # can resume this exact call without another LLM plan.
+                                if self.protocol_store:
+                                    self.protocol_store.save_protocol(raw.record_id, {
+                                        'status': 'active', 'snapshot': snapshot, 'steps': step+1,
+                                        'messages': [*messages, {'role': 'tool', 'tool_call_id': call['id'],
+                                            'content': compact_json({'state': 'awaiting_dispatch'})}],
+                                        'context_stats': turn_stats, 'computer_wait': computer_wait})
                             result = handlers[name][1](**args)
                             # A blocking backend (e.g. an out-of-process search) must
                             # not stall the loop shared by every group, so async
@@ -260,7 +302,12 @@ class ReadingConversation(Conversation):
                     messages.append({"role": "tool", "tool_call_id": call["id"], "content": compact_json(result)})
                 timings["tool_seconds"] += time.perf_counter()-tools_started
                 if self.protocol_store:
+                    pending = (computer_wait and result.get('task_id') and
+                               result.get('state') in {'queued', 'running', 'pausing', 'cancelling'})
                     self.protocol_store.save_protocol(raw.record_id, {"status": "active", "snapshot": snapshot,
                         "steps": step+1, "messages": messages, "tool_audit": read_audit(messages),
-                        "context_stats": turn_stats})
+                        "context_stats": turn_stats,
+                        **({'computer_wait': computer_wait} if pending else {})})
+                    if pending:
+                        raise ComputerTaskPending(result['task_id'])
             raise ProviderError("tool step limit reached; raw user message preserved, no fictitious reply committed")

@@ -1,5 +1,13 @@
 # MYATRI-AstrBot HANDOFF
 
+## HARNESS-SAME-TURN-RESULT（2026-10-22）
+
+本轮用户不接受独立Harness报告与聊天各自回答。先读 [本轮修复](../Harness同轮结果回传修复_2026-10-22.md)，它取代下方旧报告架构说明。computer_control身份核验不再要求/pc，自然owner提供可选instructions工具；明确/pc任务和直接硬件查询才强制委派，普通聊天不自动提交。ReadingConversation在调用前保存带真实call ID的完整工具协议，再通过before_submit登记等待；ComputerTaskPending使Bridge释放锁并返回内部等待态，插件不会发送它。
+
+computer_reporting只续接原Bridge._generate/ReadingConversation，实际feedback回填原tool消息后才继续主模型；没有单独computer_report用途请求。computer_reports仍存等待/生成退避，delivery_id改为原wx消息；trigger_kind=computer_report供现有插件轮询，不能误认为独立报告。不要恢复历史任务自动补报，也不要把queued当最终工具结果让主模型先回复。旧prepared pc_report草稿升级时superseded，sent/unknown及正文保留。状态/停止命令原直达路径保留。
+
+用户要求快速最低验证，最终报告/续接19项通过18.84秒，Ruff/diff通过。提交前断点用例的测试信封必须与已归档原消息一致，不可为了模拟渠道附加字段只改delivery而不改raw正文，否则正确触发原消息不可变保护。早先旧中间版全量571通过/5失败，后续修复已定向覆盖，不再重跑全量或宣称全绿。生产需正常重启加载，未调用付费模型或测试群发，未绕过此前重启审批拒绝；相邻核心/角色卡/插件接口不改。Git结果以本次提交为准。
+
 ## BRIDGE-STARTUP-COLD-REPORT（2026-10-22）
 
 用户启动失败stderr/stdout空，进程已被launcher finally清理，reader曾ready。serverimport约1.84秒，无异常。上一轮报告loop即刻tick可在aiohttp监听前调用_application冷加载，回归测试先失败（health前called已set），加await sleep1启动grace后通过，和原summaryloop保持一致。ComputerAgent队列/权限/模型账本/原任务均未改。

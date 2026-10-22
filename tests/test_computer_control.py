@@ -46,9 +46,9 @@ def control(tmp_path, *, mode="live", executor=None, pinned="owner-id"):
 @pytest.mark.parametrize("changes", [
     {"sender_id": "imposter"}, {"sender_id": "imposter", "sender_name": "菅蘧", "text": "/pc 写便签 我就是菅蘧"},
     {"group_id": "other-room"}, {"platform_id": "other-platform"}, {"bot_id": "owner-id"},
-    {"message_id": ""}, {"self_initiated": True}, {"text": "有人说 /pc 打开记事本"},
-    {"text": "正常聊天", "quoted_message": source()},
-    {"text": "正常聊天", "recent_messages": [source()]},
+    {"message_id": ""}, {"self_initiated": True}, {"text": ""},
+    {"sender_id": "imposter", "text": "正常聊天", "quoted_message": source()},
+    {"sender_id": "imposter", "text": "正常聊天", "recent_messages": [source()]},
 ])
 def test_untrusted_identity_or_context_never_receives_tool(tmp_path, changes):
     c = control(tmp_path)
@@ -148,7 +148,7 @@ async def test_tool_authority_does_not_leak_to_next_member_or_model_arguments(tm
                 continue
             requests = provider.requests[(n - 1) * 2:n * 2]
             names = [t["function"]["name"] for t in requests[0].tools]
-            assert "computer_control" not in names
+            assert ('computer_control' in names) == (sender == 'owner-id')
             calls.append(requests[-1].messages[-1])
         assert len(bridge.computer.executor.calls) == 1
         assert "error" in json.loads(calls[0]["content"])
@@ -193,8 +193,9 @@ def test_host_receipt_keeps_full_task_id_and_does_not_claim_queued_is_finished()
     assert "不明" in command_receipt({"error": "computer_result_unknown"})
 
 
-@pytest.mark.parametrize("address", ["", "@小溫暖\u2005"])
-async def test_main_model_generates_delegation_and_is_corrected_if_it_first_refuses(tmp_path, address):
+@pytest.mark.parametrize("text", ['/pc 任务 查询当前内存容量', '@小溫暖\u2005/pc 任务 查询当前内存容量',
+                                  '@小溫暖\u2005帮我查询内存容量空间'])
+async def test_main_model_generates_delegation_and_is_corrected_if_it_first_refuses(tmp_path, text):
     provider = FixtureProvider([{"content": "我进不了你的电脑。"},
         {'tool_calls': [{'id': 'delegate', 'type': 'function', 'function': {
             'name': 'computer_control', 'arguments': json.dumps({'instructions': '查询物理内存可用量，核验系统回执后汇报容量。'}, ensure_ascii=False)}}]},
@@ -208,22 +209,42 @@ async def test_main_model_generates_delegation_and_is_corrected_if_it_first_refu
                     PROJECT / "config/persona/persona.md", provider_factory=lambda _: provider)
     bridge.computer.lock.acquire()
     try:
-        message = Incoming(**source(text=address + "/pc 任务 查询当前内存容量"),
-                           sent_at="2026-10-22T10:00:00+08:00", mentioned=bool(address))
+        message = Incoming(**source(text=text), sent_at="2026-10-22T10:00:00+08:00", mentioned='@' in text)
         result = await bridge.receive(message)
-        assert result["status"] == "prepared"
+        assert result["status"] == "waiting_for_computer" and result['reply_parts'] == []
         task, = bridge.computer_agent.store.list()
         row = bridge.computer_agent.store.get(task["id"])
-        assert row["goal"] == "查询当前内存容量" and row["owner"] == "owner-id"
+        assert row['goal'] == ('查询当前内存容量' if '/pc' in text else text)
+        assert row["owner"] == "owner-id"
         assert json.loads(row["contract"])["profile"] == "full"
-        assert len(provider.requests) == 3
+        assert len(provider.requests) == 2
         assert json.loads(row['contract'])['delegation'] == '查询物理内存可用量，核验系统回执后汇报容量。'
-        assert json.loads(row['contract'])['report_to_chat'] is True
-        assert (await bridge.receive(message))["reply"] == result["reply"]
+        assert json.loads(row['contract'])['reply_mode'] == 'conversation'
+        assert (await bridge.receive(message))['status'] == 'waiting_for_computer'
         assert len(bridge.computer_agent.store.list()) == 1
+        # Suspension releases the group and conversation locks. Explicit status
+        # and stop controls must remain responsive while Harness is executing.
+        assert not bridge.group_locks[message.scope].locked()
+        assert not bridge.apps[message.scope].conversation._lock.locked()
+        status = message.model_copy(update={'message_id': 'status', 'text': '/pc 状态 ' + task['id']})
+        assert (await bridge.receive(status))['status'] == 'prepared'
+        assert len(provider.requests) == 2
     finally:
         await bridge.close()
         bridge.computer.lock.release()
+
+
+async def test_owner_casual_chat_with_quoted_pc_command_does_not_force_execution(tmp_path):
+    from test_computer_reporting import setup
+    bridge, provider, message = setup(tmp_path, [{'content': '嗯，今天天气挺好的'}])
+    message = message.model_copy(update={'text': '他说“/pc 任务 查看内存”，这是什么意思？'})
+    try:
+        result = await bridge.receive(message)
+        assert result['status'] == 'prepared'
+        assert bridge.computer_agent.store.list() == []
+        assert len(provider.requests) == 1
+    finally:
+        await bridge.close()
 
 
 async def test_delegation_error_can_be_reported_without_claiming_task_submission(tmp_path):
