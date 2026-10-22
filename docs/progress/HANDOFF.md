@@ -1,5 +1,9 @@
 # MYATRI-AstrBot HANDOFF
 
+## PORTABLE-FEEDBACK-SYNC（2026-10-22）
+
+用户授权已将可移植改进同步核心GitHub b3fc03b，源代码取AstrBot19a320d；来源Git blob哈希在核心docs/harness_feedback_port_source.json。核心回传续接器按_application_location使用原私聊库，不是桥版root/scope；保留原CLI身份/PrivateRecall/provider账本。110项定向63.50秒及Ruff/diff/wheel通过，不跑全量，无生产重启/付费/群发。群唤醒和本仓同库模式切换入口未迁入；旧“仅AstrBot完成”的移植文档以最新顶部说明为准。桥源码无需为核心发布而换vendor。
+
 ## LOCAL-CLI-SHARED-LIBRARY（2026-10-22）
 
 用户明确撤回独立私聊网页/端口方案，改为命令行与原群模式互斥、同一记忆和上下文库。先读 [同库命令行入口](../命令行私聊与群聊同库_2026-10-22.md)。local_chat.py选择既有group_routes且白名单仍授权的scope，复用Bridge和原state_root/scope；不要另建private scope、复制档案或做跨库检索。Start-Local-Chat.cmd使用原配置，--offline只做测试；service.lock与server相同，不自动结束群服务。原库中的owner固定为终端人类来源，不凭昵称或原话认证。

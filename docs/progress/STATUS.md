@@ -1,5 +1,9 @@
 # MYATRI-AstrBot STATUS
 
+## PORTABLE-FEEDBACK-SYNC（2026-10-22）
+
+按用户要求核验AstrBot19a320d已在GitHub，随后将可移植Harness同轮结果回传、回执校验/有界收尾、自然语言接单及换行分段同步MYATRI核心并推送b3fc03b。核心适配原档案定位、原provider账本及CLI终端报告接收，110项定向通过63.50秒、Ruff/diff/wheel通过；没有复制群库、角色卡、本机配置或移入attention/群模式切换入口。两项目均未启动或重启生产实例，没有真实模型/微信测试发送。详见 [移植说明](../Harness通用执行与双仓迁移_2026-10-22.md)。
+
 ## LOCAL-CLI-SHARED-LIBRARY（2026-10-22）
 
 按用户修正撤回所有未提交的独立私聊端口/网页/跨库方案。新增Start-Local-Chat.cmd及local_chat.py，使用group_routes中仍授权的原会话scope，直接复用原应用、记忆、上下文及Harness。单库自动接入，多库明确选择，不新建或迁移库。当前人类固定取owner_id，CLI原话与助手输出标transport=local_cli，终端输出确认后进入原历史；不覆盖原微信路由，群模式可接续私聊历史，但不把私聊内容当群发言或主动展开敏感内容。新增字段默认值不进入旧消息指纹。
