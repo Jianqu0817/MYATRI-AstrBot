@@ -57,9 +57,10 @@ class PendingQuery(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
     scope: str = Field(pattern=r"^[0-9a-f]{32}$")
+    kind: Literal['computer_report'] | None = None
 
 
-def pending_deliveries(path, scope, limit=5):
+def pending_deliveries(path, scope, limit=5, *, kind=None):
     """只读查询该 scope 下 ``status='prepared'`` 的投递。
 
     刻意使用只读连接，与 health 一致；这里绝不改动投递状态机，
@@ -70,8 +71,8 @@ def pending_deliveries(path, scope, limit=5):
         db.execute("PRAGMA query_only=ON")
         rows = db.execute(
             "SELECT id,reply,reply_parts,sent_parts,trigger_kind FROM deliveries "
-            "WHERE scope=? AND status='prepared' ORDER BY rowid LIMIT ?",
-            (scope, limit),
+            "WHERE scope=? AND status='prepared' " + ("AND trigger_kind=? " if kind else '') + "ORDER BY rowid LIMIT ?",
+            (scope, kind, limit) if kind else (scope, limit),
         ).fetchall()
     result = []
     for key, reply, reply_parts, sent_parts, trigger_kind in rows:
@@ -133,7 +134,7 @@ def create_app(bridge, token):
         # 参数校验与 RuntimeControl 同一风格：pydantic 严格模型 + 中间件统一 400。
         query = PendingQuery.model_validate(dict(request.query))
         return web.json_response(
-            {"scope": query.scope, "deliveries": pending_deliveries(bridge.path, query.scope)}
+            {"scope": query.scope, "deliveries": pending_deliveries(bridge.path, query.scope, kind=query.kind)}
         )
 
     async def acknowledge(request):
@@ -177,7 +178,8 @@ def create_app(bridge, token):
         if task:
             if len(task)!=64 or any(c not in '0123456789abcdef' for c in task):
                 raise ValueError('invalid_task')
-            return web.json_response({'ok':True,'task':agent.store.details(task)})
+            return web.json_response({'ok':True,'task':agent.store.details(task) |
+                                     {'chat_report': bridge.computer_reports.status(task)}})
         return web.json_response({'ok':True,'enabled':True,'permission_profile':agent.profile,'tasks':agent.store.list()})
 
     async def startup(app):

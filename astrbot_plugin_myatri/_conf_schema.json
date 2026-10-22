@@ -4,5 +4,5 @@
   "bridge_url": {"description": "本机桥接服务地址", "type": "string", "default": "http://127.0.0.1:8766"},
   "token_file": {"description": "桥接token文件绝对路径（不是模型API Key）", "type": "string", "default": "D:/DS_workspace/MYATRI-AstrBot/var/bridge-token.txt"},
   "trigger_prefix": {"description": "除@外的显式触发前缀", "type": "string", "default": "/warm "},
-  "proactive_enabled": {"description": "启用主动发言轮询（默认关闭，需桥接侧同时开启调度器）", "type": "bool", "default": false}
+  "proactive_enabled": {"description": "启用闲聊主动发言（默认关闭，需桥接侧同时开启调度器）；电脑任务汇报始终轮询，不受此开关影响", "type": "bool", "default": false}
 }

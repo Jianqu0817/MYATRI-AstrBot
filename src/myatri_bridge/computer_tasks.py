@@ -90,7 +90,7 @@ class TaskStore:
                     return '执行报告（尚未完成校验，摘自原始会话记录）：\n' + text[:1000]
         return summary
 
-    def feedback(self, owner, scope):
+    def feedback(self, owner, scope, *, task=None):
         """Bounded internal CC; no raw terminal output, file content or reasoning."""
         def text(value, limit):
             value = re.sub(r"(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})",
@@ -101,7 +101,8 @@ class TaskStore:
         reports = []
         with self.db() as db:
             rows = db.execute("SELECT id,goal,state,summary,updated FROM tasks WHERE owner=? AND scope=? "
-                              "ORDER BY updated DESC LIMIT 3", (owner, scope)).fetchall()
+                              + ('AND id=? ' if task else '') + "ORDER BY updated DESC LIMIT 3",
+                              (owner, scope, task) if task else (owner, scope)).fetchall()
             for task, goal, state, summary, updated in rows:
                 actions = []
                 for (payload,) in db.execute("SELECT payload FROM events WHERE task=? ORDER BY seq DESC LIMIT 100", (task,)):

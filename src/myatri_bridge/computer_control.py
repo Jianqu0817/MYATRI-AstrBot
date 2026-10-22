@@ -6,6 +6,7 @@ model arguments, quoted messages, aliases, prior turns or retrieved documents.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from contextlib import closing
 import hashlib
 import json
@@ -32,7 +33,9 @@ RULES = (
 RULES += ('对于 /pc 任务，调用只提交宿主绑定目标的执行任务；queued/running不是完成，不得等待或虚构结果。'
     '主对话负责理解目标和汇报任务号、状态；执行Agent负责在原授权内观察、操作、验证。'
     '状态/暂停/继续/取消同样绑定本轮命令；旧任务不能由其他人接管。'
-    '详细结果只在本机面板显示，不把目录、文件正文、窗口文字或推理过程发进群。')
+    '你负责把当前真实目标转写为清晰的instructions，调用computer_control委派Harness；不能假称没有执行器。'
+    '执行结束后宿主会把报告回交给你，由你生成微信汇报；按真实状态区分已验证、受阻或不明。'
+    '汇报目标所需的结果，不公开无关目录、文件正文、凭据或推理过程。')
 HELP = "/pc 打开记事本；/pc 写便签 内容；/pc 读便签；/pc 任务 目标；/pc 状态|暂停|继续|取消 完整任务号"
 
 
@@ -173,10 +176,20 @@ class ComputerControl:
         if not self.authorized(source) or raw.author_kind != "human":
             return {}
         action = parse_command(source["text"])
+        delegated = command_body(source['text']).startswith('任务 ')
+        definition = deepcopy(TOOL)
+        if delegated:
+            definition['function']['description'] = (
+                '由小温暖生成instructions并委派Harness执行当前/pc任务。用户原始目标、账号和群由宿主固定；'
+                '你只填写目标内的步骤、验证和报告要求。返回任务号后先告知接单，任务结束会交回你生成微信汇报。')
+            definition['function']['parameters'] = {'type': 'object', 'additionalProperties': False,
+                'properties': {'instructions': {'type': 'string', 'minLength': 1, 'maxLength': 6000,
+                    'description': '由小温暖生成的具体执行指令：目标、必要步骤、验证与报告要求；不得扩展当前用户目标。'}},
+                'required': ['instructions']}
         task_id = hashlib.sha256(json.dumps([source["platform_id"], source["bot_id"],
             source["group_id"], source["message_id"]], ensure_ascii=False).encode("utf-8")).hexdigest()
 
-        async def execute():
+        async def execute(**kwargs):
             # Recheck the owner gate immediately before dispatch; raw/model
             # args cannot introduce a new task or replace the transport source.
             if not self.authorized(source):
@@ -184,13 +197,13 @@ class ComputerControl:
             if action is None:
                 if self.agent and self.agent.enabled:
                     try:
-                        return self.agent.submit(source,task_id)
+                        return self.agent.submit(source,task_id, instructions=kwargs.get('instructions', ''))
                     except ValueError:
                         return {"error":"computer_task_state_conflict"}
                 return {"error": "unsupported_computer_command", "help": HELP}
             return await asyncio.to_thread(self._execute_once, task_id, action)
 
-        return {"computer_control": (TOOL, execute)}
+        return {"computer_control": (definition, execute)}
 
     def _execute_once(self, task_id, action):
         if not self.lock.acquire(blocking=False):

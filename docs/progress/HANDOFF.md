@@ -1,5 +1,15 @@
 # MYATRI-AstrBot HANDOFF
 
+## HARNESS-DELEGATION-REPORT-LOOP（2026-10-22）
+
+用户明确恢复原设想：主小温暖生成委派指令、Harness回报告、主模型微信汇报；并修复两段粘连。先读 [本轮说明](../任务委派与微信汇报闭环_2026-10-22.md)。旧/pc任务直入队分支已撤出，当前owner /pc任务动态schema要求instructions，主模型按原goal生成后调computer_control，合同delegation记录。固定操作与任务控制仍直达。未委派的纯文字拒绝收到一次纠正，再拒绝则ProviderError；真实错误允许汇报，不伪造提交。身份/原目标/去重仍宿主控制，子Agent提示明确goal优先。
+
+computer_reporting.py提供持久报告outbox，Bridge.start单独任务每2秒检查终态；task+turn唯一，先原接单确认sent再生成、以原群owner源鉴权。先给报告预留上下文，主角色/原gateway tools=[] purpose=computer_report，关闭内部重试，生成3次/60s退避；事务提交prepared后不再生成。源数据和报告持久化，cancelled/unknown也如实报告。旧任务每scope仅补最新legacy，绝不重执行任务。server详情chat_report显示生成/投递/段数，claim前复核权限。已确认发送才经ack进assistant群历史，不造人类消息。失败/重启的unknown不重投。
+
+插件initialize现在始终启动投递轮询；proactive_enabled=false时GET pending带kind=computer_report，仅汇报用户任务，不开闲聊。pending query显式可选kind与原scope校验。这次已经用prepare安装源码/配置schema到upstream的本插件目录，不改微信账号/群配置。需要正常重启整个Start-WeChat-Live以加载桥+插件；此前重启被审批拒绝，此轮不绕过。
+
+bubbles支持无句号的单/双换行，显式分隔符短句也保留为多段，多行引语不拆；超过3段在第三段保留空行，不再无分隔拼接。真实历史只读复核，无重发。完整560项通过389.04秒，最终相关66项通过16.76秒（覆盖完整启动后追加的引语/真实委派失败反馈边界，数字重叠不相加）；Ruff/diff、wheel资产逐字节/私密排除、插件源码安装一致通过。真实Harness+离线模型的完整主委派->执行->主汇报链路、AST执行真实插件投递方法+模拟平台均验证，未手工付费/群测试。没有重启当前服务，需用户正常启动器加载，不把测试说成生产微信验收。
+
 ## HARNESS-MISSING-FINISH（2026-10-22）
 
 用户贴5/25,190为旧11:50任务；12:07还有新任务两次pwsh成功、第三次仅文本报告，缺finish导致通用blocked。ComputerAgent._model新增completion_only内参：full纯文本先TaskStore.save_draft（WHERE running，仅改summary，不覆写pause），再仅一次递归同gateway模型收尾，tools仅FULL_FINISH；host提示真实ID、不重执行。每次仍独立正常预留/计费、调用上限、超时与不重试；收尾若发其他工具拒绝，不会进入native调度。若再纯文本则保留draft，run兜底blocked时附未完成校验说明。没有按退出码自动宣称任务完成，也没有重放生产任务。

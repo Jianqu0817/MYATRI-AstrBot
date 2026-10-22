@@ -99,8 +99,8 @@ class MyatriPlugin(Star):
             trust_env=False,
             follow_redirects=False,
         )
-        # 主动发言默认关闭；只有显式打开才启动 10 秒轮询任务。
-        if self.config.get("proactive_enabled", False) and self.proactive_task is None:
+        # Task reports are requested replies, independent of casual proactive speech.
+        if self.proactive_task is None:
             self.proactive_task = asyncio.create_task(self._proactive_loop())
 
     async def _proactive_loop(self):
@@ -127,9 +127,10 @@ class MyatriPlugin(Star):
         """取出该 scope 的待投递并逐条 claim→发送→逐段 ack。"""
         if self.client is None or self.context is None:
             return
-        response = await self.client.get(
-            "/v1/deliveries/pending", params={"scope": target["scope"]}
-        )
+        params = {"scope": target["scope"]}
+        if not self.config.get('proactive_enabled', False):
+            params['kind'] = 'computer_report'
+        response = await self.client.get("/v1/deliveries/pending", params=params)
         response.raise_for_status()
         deliveries = response.json().get("deliveries")
         if not isinstance(deliveries, list):

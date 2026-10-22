@@ -219,6 +219,9 @@ class Bridge:
                 scope TEXT NOT NULL,candidate_id TEXT NOT NULL,delivery_id TEXT NOT NULL,
                 PRIMARY KEY(scope,candidate_id))""")
             self.routes = {row[0]: json.loads(row[1]) for row in db.execute("SELECT * FROM group_routes")}
+        from .computer_reporting import ComputerReports
+        self.computer_reports = ComputerReports(self)
+        self.computer_report_task = None
 
     def _cache_message(self, db, scope, key, fingerprint, payload):
         db.execute("INSERT OR IGNORE INTO recent_messages VALUES (?,?,?,?)",
@@ -670,6 +673,8 @@ class Bridge:
 
     def start(self):
         self.computer_agent.start()
+        if self.computer_agent.enabled and self.computer_report_task is None:
+            self.computer_report_task = asyncio.create_task(self.computer_reports.loop())
         if self.summary_task is None:
             self.summary_task = asyncio.create_task(self._summary_loop())
         for scope in self.routes:
@@ -925,6 +930,10 @@ class Bridge:
             with closing(sqlite3.connect(self.path)) as db, db:
                 if self._superseded(db, key):
                     return {"claimed": False}
+                if key.startswith('pc_report_'):
+                    report = db.execute('SELECT envelope FROM deliveries WHERE id=?', (key,)).fetchone()
+                    if not report or not self.computer.authorized(json.loads(report[0])):
+                        return {'claimed': False}
                 if key.startswith("pro_") and self._proactive_stale(db, key):
                     return {"claimed": False}
                 changed = db.execute(
@@ -1013,6 +1022,9 @@ class Bridge:
             return {"status": next_status, **({"sent_parts": end} if part_index is not None else {})}
 
     async def close(self):
+        if self.computer_report_task:
+            self.computer_report_task.cancel()
+            await asyncio.gather(self.computer_report_task, return_exceptions=True)
         await self.computer_agent.close()
         for scheduled, task in list(self.proactive_schedulers.values()):
             scheduled.stop()

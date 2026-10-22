@@ -194,8 +194,11 @@ def test_host_receipt_keeps_full_task_id_and_does_not_claim_queued_is_finished()
 
 
 @pytest.mark.parametrize("address", ["", "@小溫暖\u2005"])
-async def test_explicit_task_is_queued_even_when_chat_model_would_refuse(tmp_path, address):
-    provider = FixtureProvider([{"content": "我进不了你的电脑。"}])
+async def test_main_model_generates_delegation_and_is_corrected_if_it_first_refuses(tmp_path, address):
+    provider = FixtureProvider([{"content": "我进不了你的电脑。"},
+        {'tool_calls': [{'id': 'delegate', 'type': 'function', 'function': {
+            'name': 'computer_control', 'arguments': json.dumps({'instructions': '查询物理内存可用量，核验系统回执后汇报容量。'}, ensure_ascii=False)}}]},
+        {'content': '交给执行Agent了，结果出来我会告诉你。'}])
     settings = {"project_root": str(tmp_path), "mode": "live", "allowed_groups": ["fixture|room"],
         "owner_id": "owner-id", "owner_name": "菅蘧", "random_reply_probability": 0,
         "quality_guard_enabled": False, "computer": {"enabled": True, "owner_id": "owner-id",
@@ -208,17 +211,38 @@ async def test_explicit_task_is_queued_even_when_chat_model_would_refuse(tmp_pat
         message = Incoming(**source(text=address + "/pc 任务 查询当前内存容量"),
                            sent_at="2026-10-22T10:00:00+08:00", mentioned=bool(address))
         result = await bridge.receive(message)
-        assert result["status"] == "prepared" and "已排队" in result["reply"]
+        assert result["status"] == "prepared"
         task, = bridge.computer_agent.store.list()
         row = bridge.computer_agent.store.get(task["id"])
         assert row["goal"] == "查询当前内存容量" and row["owner"] == "owner-id"
         assert json.loads(row["contract"])["profile"] == "full"
-        assert task["id"] in result["reply"] and provider.requests == []
+        assert len(provider.requests) == 3
+        assert json.loads(row['contract'])['delegation'] == '查询物理内存可用量，核验系统回执后汇报容量。'
+        assert json.loads(row['contract'])['report_to_chat'] is True
         assert (await bridge.receive(message))["reply"] == result["reply"]
         assert len(bridge.computer_agent.store.list()) == 1
     finally:
         await bridge.close()
         bridge.computer.lock.release()
+
+
+async def test_delegation_error_can_be_reported_without_claiming_task_submission(tmp_path):
+    provider = FixtureProvider([
+        {'tool_calls': [{'id': 'delegate', 'type': 'function', 'function': {
+            'name': 'computer_control', 'arguments': '{"instructions":"查询内存并核验"}'}}]},
+        {'content': '执行器现在没有启用，暂时没有提交任务。'}])
+    settings = {'project_root': str(tmp_path), 'mode': 'live', 'allowed_groups': ['fixture|room'],
+        'owner_id': 'owner-id', 'quality_guard_enabled': False, 'computer': {'enabled': True,
+            'owner_id': 'owner-id', 'node_path': 'node.exe', 'runtime_root': 'unused'}}
+    bridge = Bridge(tmp_path/'groups', settings, load_config(PROJECT/'config/engine.toml'),
+                    PROJECT/'config/persona/persona.md', provider_factory=lambda _: provider)
+    try:
+        result = await bridge.receive(Incoming(**source(text='/pc 任务 查询内存'),
+            mentioned=True, sent_at='2026-10-22T12:00:00+08:00'))
+        assert result['status'] == 'prepared' and '没有提交任务' in result['reply']
+        assert len(provider.requests) == 2
+    finally:
+        await bridge.close()
 
 
 def test_installed_harness_writes_and_reads_only_temporary_note(tmp_path):

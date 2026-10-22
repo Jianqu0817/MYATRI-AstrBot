@@ -16,10 +16,24 @@ def prepare_bubbles(text, policy):
     body = policy.prepare(text.replace(SEPARATOR, "\n\n"))
     if not body:
         return body, []
-    if sum(not c.isspace() for c in body) <= 15 or "`" in body or re.search(r"https?://|www\.", body):
+    if "`" in body:
         return body, [body]
     if marked:
         parts = [part.strip() for part in body.split("\n\n") if part.strip()]
+    elif '\n' in body and not re.search(r'(?m)^\s*(?:[-*+] |\d+[.)] |\||#{1,6} )', body):
+        # Casual Chinese replies often omit punctuation. A deliberate line break
+        # still separates bubbles, even when there are no sentence terminators.
+        boundaries = [0]
+        for match in re.finditer(r'\n+', body):
+            prefix = body[:match.start()]
+            if any(prefix.count(left) > prefix.count(right) for left, right in
+                   (("“", "”"), ("‘", "’"), ("「", "」"), ("『", "』"))) or prefix.count('"') % 2:
+                continue
+            boundaries.append(match.end())
+        parts = [body[a:b].strip() for a, b in zip(boundaries, [*boundaries[1:], len(body)], strict=True)
+                 if body[a:b].strip()]
+    elif sum(not c.isspace() for c in body) <= 15 or re.search(r"https?://|www\.", body):
+        return body, [body]
     else:
         # Only sentence boundaries are a fallback; never cut words to hit 15.
         boundaries = []
@@ -33,5 +47,5 @@ def prepare_bubbles(text, policy):
         ends = [*boundaries, len(body)]
         parts = [body[a:b].strip() for a, b in zip(starts, ends, strict=True) if body[a:b].strip()]
     if len(parts) > 3:
-        parts = [parts[0], parts[1], "".join(parts[2:])]
+        parts = [parts[0], parts[1], "\n\n".join(parts[2:])]
     return body, parts or [body]

@@ -13,7 +13,7 @@ BEIJING = timezone(timedelta(hours=8))
 PURPOSES = frozenset({"conversation", "group_short_memory", "emotion_batch", "emotion",
     "group_reply_guard", "proactive_speak", "group_memory_support_review", "behavior_attribution",
     "A1", "A1_batch", "A1_support", "context_compaction", "temporary_state_activation",
-    "reflection", "persona", "interpretation", "experience", "computer_execution"})
+    "reflection", "persona", "interpretation", "experience", "computer_execution", "computer_report"})
 KINDS = ("raw_message", "message", "event", "experience", "interpretation", "reflection",
          "summary", "temporary_state", "persona_version", "persona_change", "emotion_appraisal",
          "emotion_retraction", "cognitive_run")

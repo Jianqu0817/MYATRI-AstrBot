@@ -92,7 +92,9 @@ class ReadingConversation(Conversation):
             saved = self.protocol_store.get_protocol(raw.record_id) if self.protocol_store else None
             if saved and saved["status"] == "context_reset":
                 raise ProviderError("turn belongs to a cleared context; use a new message ID")
-            if self.enable_tools and "computer_control" in handlers:
+            delegated = ('computer_control' in handlers and 'instructions' in
+                         handlers['computer_control'][0]['function']['parameters'].get('properties', {}))
+            if self.enable_tools and "computer_control" in handlers and not delegated:
                 # /pc is already an exact, owner-bound host command. Dispatch it
                 # once without asking the chat model whether it has this ability.
                 # The independent Harness agent still plans and executes the goal.
@@ -138,6 +140,18 @@ class ReadingConversation(Conversation):
                 rules = rules + "\n" + WEB_SEARCH_RULES
             if not any(m.get("role") == "system" and m.get("content") == rules for m in messages):
                 messages.insert(0, {"role": "system", "content": rules})
+            delegation_calls = {call['id'] for m in messages for call in m.get('tool_calls', [])
+                                if call.get('function', {}).get('name') == 'computer_control'}
+            task_submitted = False
+            delegation_attempted = False
+            for message in messages:
+                if message.get('role') == 'tool' and message.get('tool_call_id') in delegation_calls:
+                    try:
+                        result = json.loads(message['content'])
+                        task_submitted = task_submitted or bool(result.get('task_id'))
+                        delegation_attempted = True
+                    except (ValueError, AttributeError):
+                        pass
             for step in range(start_step, self.max_steps):
                 reply_policy = self.context.reply_policy
                 output_tokens = self.context.budget.output_reserve
@@ -157,6 +171,16 @@ class ReadingConversation(Conversation):
                 self.context.budget.calibrate(messages, response.usage, tools)
                 if self.protocol_store and checkpoint:
                     self.protocol_store.set_meta("context_token_anchor", self.context.budget.anchor)
+                if delegated and not delegation_attempted and not task_submitted and not response.tool_calls:
+                    # One explicit correction, preserving the main model's role
+                    # as delegator instead of silently substituting host prose.
+                    if step > start_step:
+                        raise ProviderError('computer delegation missing; task was not submitted')
+                    messages.append(assistant_message(response))
+                    messages.append({'role': 'system', 'content':
+                        '当前已核验用户明确提交电脑任务。请生成instructions并调用computer_control委派Harness，'
+                        '不能只回复做不到或声称已接单。宿主将按原始用户目标核验身份，任务完成后会让你汇报。'})
+                    continue
                 if not response.tool_calls:
                     if self.reply_guard is not None:
                         guard_started = time.perf_counter()
@@ -219,6 +243,9 @@ class ReadingConversation(Conversation):
                             # handlers are awaited and run in their own worker thread.
                             if inspect.isawaitable(result):
                                 result = await result
+                            if name == 'computer_control':
+                                delegation_attempted = True
+                                task_submitted = bool(result.get('task_id'))
                             if name == "read_group_message":
                                 result = cold_page(result, args["message_id"], read_audit(messages))
                         else:

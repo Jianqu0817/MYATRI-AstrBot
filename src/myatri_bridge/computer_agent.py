@@ -110,7 +110,7 @@ class ComputerAgent:
         if self.enabled and self.worker is None:
             self.worker = asyncio.create_task(self.loop())
 
-    def submit(self, source, task_id):
+    def submit(self, source, task_id, *, instructions=''):
         if not self.enabled or not self.computer.authorized(source):
             return {"error": "computer_owner_required"}
         from .computer_control import command_body
@@ -119,6 +119,8 @@ class ComputerAgent:
             :32
         ]
         if command.startswith("任务 "):
+            if not isinstance(instructions, str) or len(instructions) > 6000:
+                return {'error': 'invalid_execution_instructions'}
             goal = command[3:].strip()
             if not goal or len(goal) > 6000:
                 return {"error": "invalid_task_goal"}
@@ -162,6 +164,11 @@ class ComputerAgent:
                 "arbitrary_commands": self.profile == "full",
                 "prompt": self.prompt,
                 "goal": goal,
+                "delegation": instructions[:6000],
+                "report_to_chat": True,
+                "channel_source": {k: source[k] for k in (
+                    'platform_id', 'bot_id', 'group_id', 'sender_id', 'message_id', 'text',
+                    'sender_name', 'sent_at') if k in source},
             }
             if self.profile == "full":
                 contract["limits"] = {
