@@ -160,6 +160,10 @@ class ComputerReports:
                                (time.time() + 60, task, turn))
 
     async def loop(self):
+        # aiohttp schedules startup tasks before binding its listening socket.
+        # Loading archived persona/index data here must not race the first health
+        # check, otherwise the launcher can kill a healthy cold-starting process.
+        await asyncio.sleep(1)
         while True:
             try:
                 await self.tick()

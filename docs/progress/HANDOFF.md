@@ -1,5 +1,13 @@
 # MYATRI-AstrBot HANDOFF
 
+## BRIDGE-STARTUP-COLD-REPORT（2026-10-22）
+
+用户启动失败stderr/stdout空，进程已被launcher finally清理，reader曾ready。serverimport约1.84秒，无异常。上一轮报告loop即刻tick可在aiohttp监听前调用_application冷加载，回归测试先失败（health前called已set），加await sleep1启动grace后通过，和原summaryloop保持一致。ComputerAgent队列/权限/模型账本/原任务均未改。
+
+wechat_services新增Wait-MyatriBridgeReady（默认90秒，Stopwatch，Refresh，5秒进度，exitcode与alive超时分型，两个日志路径，不输出token/异常正文），start_wechat用-u并调用helper。server.main立即flush启动阶段python_entry/reading_config/initializing_bridge/binding_http/http_listening与PID/elapsed，不含内容。保留原清理边界和退出处理。
+
+26项launcher/startup_delivery_repair/computer_reporting通过16.16秒，全Ruff/diff通过，--help启动标记验证。没启动生产服务、调用付费或发群测试；用户需正常重试启动器。若再失败检查stdout最后阶段，不能只找空stderr；没有宣称live完整启动通过。详见 [本轮诊断](../启动超时与空日志修复_2026-10-22.md)。
+
 ## HARNESS-DELEGATION-REPORT-LOOP（2026-10-22）
 
 用户明确恢复原设想：主小温暖生成委派指令、Harness回报告、主模型微信汇报；并修复两段粘连。先读 [本轮说明](../任务委派与微信汇报闭环_2026-10-22.md)。旧/pc任务直入队分支已撤出，当前owner /pc任务动态schema要求instructions，主模型按原goal生成后调computer_control，合同delegation记录。固定操作与任务控制仍直达。未委派的纯文字拒绝收到一次纠正，再拒绝则ProviderError；真实错误允许汇报，不伪造提交。身份/原目标/去重仍宿主控制，子Agent提示明确goal优先。

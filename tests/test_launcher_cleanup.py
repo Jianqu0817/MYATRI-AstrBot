@@ -123,3 +123,42 @@ def test_launcher_scripts_parse_in_windows_powershell_and_cleanup_precedes_prepa
     assert "WaitOne(8000)" in source
     for name in ("Start-WeChat.cmd", "Start-WeChat-Live.cmd"):
         assert "start_wechat.ps1" in (ROOT / name).read_text(encoding="utf-8")
+
+
+def test_bridge_health_wait_refreshes_process_and_accepts_slow_readiness(tmp_path):
+    run_ps(tmp_path, r'''
+$script:probes=0
+$script:refreshes=0
+$child=[PSCustomObject]@{Id=123;HasExited=$false;ExitCode=$null}
+$child | Add-Member -MemberType ScriptMethod -Name Refresh -Value {$script:refreshes++}
+function Invoke-RestMethod {
+ param($Uri,$Headers,$TimeoutSec)
+ $script:probes++
+ if ($script:probes -lt 3) { throw 'synthetic service still initializing' }
+ [PSCustomObject]@{ok=$true;mode='offline'}
+}
+$health=Wait-MyatriBridgeReady -Process $child -BaseUrl 'http://127.0.0.1:12345' -Token 'fixture-secret' -TimeoutSeconds 3
+if (-not $health.ok -or $script:probes -ne 3 -or $script:refreshes -ne 3) { throw 'Cold readiness was not awaited' }
+''')
+
+
+def test_bridge_health_wait_distinguishes_exit_and_timeout_without_leaking_token(tmp_path):
+    run_ps(tmp_path, r'''
+$child=[PSCustomObject]@{Id=321;HasExited=$true;ExitCode=7}
+$child | Add-Member -MemberType ScriptMethod -Name Refresh -Value {}
+$message=''
+try { Wait-MyatriBridgeReady -Process $child -BaseUrl 'http://127.0.0.1:12345' -Token 'fixture-secret' -TimeoutSeconds 1 } catch { $message=$_.Exception.Message }
+if ($message -notlike '*exited*exit code 7*' -or $message -notlike '*stdout.log*' -or $message -like '*fixture-secret*') { throw 'Missing or unsafe exit diagnostics' }
+$child.HasExited=$false
+$message=''
+try { Wait-MyatriBridgeReady -Process $child -BaseUrl 'http://127.0.0.1:12345' -Token 'fixture-secret' -TimeoutSeconds 0 } catch { $message=$_.Exception.Message }
+if ($message -notlike '*timed out*still running*' -or $message -notlike '*stdout.log*' -or $message -like '*fixture-secret*') { throw 'Missing or unsafe timeout diagnostics' }
+''')
+
+
+def test_wechat_launcher_uses_unbuffered_python_and_extended_health_wait():
+    source = (ROOT / 'scripts/start_wechat.ps1').read_text(encoding='utf-8')
+    assert "@('-u','-m','myatri_bridge.server')" in source
+    assert 'Wait-MyatriBridgeReady -Process $bridgeProcess' in source
+    assert '-TimeoutSeconds 90' in source
+    assert "AddSeconds(15)" not in source

@@ -53,18 +53,11 @@ try {
         & uv sync --frozen --no-dev
         if ($LASTEXITCODE -ne 0) { throw 'AstrBot environment sync failed.' }
     } finally { Pop-Location }
-    $bridgeProcess = Start-Process -FilePath (Join-Path $projectDir '.venv/Scripts/python.exe') -ArgumentList @('-m','myatri_bridge.server') -WorkingDirectory $projectDir -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $projectDir 'var/bridge.stdout.log') -RedirectStandardError (Join-Path $projectDir 'var/bridge.stderr.log')
+    $bridgeProcess = Start-Process -FilePath (Join-Path $projectDir '.venv/Scripts/python.exe') -ArgumentList @('-u','-m','myatri_bridge.server') -WorkingDirectory $projectDir -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $projectDir 'var/bridge.stdout.log') -RedirectStandardError (Join-Path $projectDir 'var/bridge.stderr.log')
     $bridgeToken = [IO.File]::ReadAllText((Join-Path $projectDir 'var/bridge-token.txt')).Trim()
-    $ready = $false
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
-    while ([DateTime]::UtcNow -lt $deadline -and -not $bridgeProcess.HasExited) {
-        try {
-            $result = Invoke-RestMethod -Uri 'http://127.0.0.1:8766/health' -Headers @{Authorization=('Bearer '+$bridgeToken)} -TimeoutSec 1
-            if ($result.ok) { $ready = $true; break }
-        } catch { Start-Sleep -Milliseconds 200 }
-    }
-    $bridgeToken = $null
-    if (-not $ready) { throw 'Bridge did not start; inspect var/bridge.stderr.log.' }
+    try {
+        $result = Wait-MyatriBridgeReady -Process $bridgeProcess -BaseUrl 'http://127.0.0.1:8766' -Token $bridgeToken -TimeoutSeconds 90 -StdoutPath (Join-Path $projectDir 'var/bridge.stdout.log') -StderrPath (Join-Path $projectDir 'var/bridge.stderr.log')
+    } finally { $bridgeToken = $null }
     Write-Host 'Starting AstrBot with the checked WeChatAgent platform.'
     Write-Host ('Backend mode: '+$result.mode+'. live uses the existing model credential; offline uses fixtures.')
     Write-Host 'Press Ctrl+C to stop this launcher and its bridge child.'

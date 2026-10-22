@@ -65,6 +65,25 @@ async def test_http_binds_before_due_summary_load_and_retains_pending(bridge, me
         assert not bridge.test_providers
 
 
+async def test_http_binds_before_task_report_cold_load(tmp_path, monkeypatch):
+    from test_computer_reporting import setup, task
+    bridge, provider, message = setup(tmp_path)
+    task(bridge, message)
+    called = asyncio.Event()
+    def load(_message):
+        called.set()
+        raise RuntimeError('offline startup boundary; no model or real app load')
+    monkeypatch.setattr(bridge, '_application', load)
+    started = time.monotonic()
+    async with TestClient(TestServer(create_app(bridge, 'x' * 40))) as client:
+        response = await client.get('/health', headers={'Authorization': 'Bearer ' + 'x' * 40})
+        assert response.status == 200 and (await response.json())['ok']
+        assert time.monotonic()-started < 1
+        assert not called.is_set(), 'Task report loaded before startup health was available'
+        await asyncio.wait_for(called.wait(), 3)
+        assert not provider.requests
+
+
 @pytest.mark.parametrize("status,progress", [("prepared", 0), ("sending", 1), ("sent", 2), ("unknown", 1), ("superseded", 0)])
 async def test_requeue_preserves_existing_delivery_and_progress_after_restart(bridge, message, status, progress):
     now = datetime.now(timezone.utc)

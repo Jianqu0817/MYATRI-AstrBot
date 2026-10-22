@@ -1,4 +1,31 @@
 # Process ownership checks shared by the launcher and offline tests.
+function Wait-MyatriBridgeReady {
+    param([object]$Process, [string]$BaseUrl, [string]$Token,
+          [int]$TimeoutSeconds = 90, [string]$StdoutPath = 'var/bridge.stdout.log',
+          [string]$StderrPath = 'var/bridge.stderr.log')
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $nextProgress = 5
+    while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            throw ('Bridge exited before becoming ready (PID '+$Process.Id+', exit code '+$Process.ExitCode+'). Check '+$StderrPath+' and '+$StdoutPath+'.')
+        }
+        try {
+            $health = Invoke-RestMethod -Uri ($BaseUrl.TrimEnd('/')+'/health') -Headers @{Authorization=('Bearer '+$Token)} -TimeoutSec 1
+            if ($health.ok) { return $health }
+        } catch {
+            # An empty stderr is normal during a slow import/archive cold load.
+            # Do not print headers or the exception (which may contain secrets).
+        }
+        if ($watch.Elapsed.TotalSeconds -ge $nextProgress) {
+            Write-Host ('Waiting for bridge (PID '+$Process.Id+', '+[int]$watch.Elapsed.TotalSeconds+'s/'+$TimeoutSeconds+'s). Startup stages: '+$StdoutPath)
+            $nextProgress += 5
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    throw ('Bridge health check timed out after '+$TimeoutSeconds+'s; process was still running (PID '+$Process.Id+'). Check startup stages in '+$StdoutPath+' and errors in '+$StderrPath+'.')
+}
+
 function ConvertTo-MyatriPath([string]$Value) {
     if (-not $Value) { return '' }
     return [IO.Path]::GetFullPath($Value).Replace('/', '\').TrimEnd('\')

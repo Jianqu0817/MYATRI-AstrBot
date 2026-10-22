@@ -4,9 +4,11 @@ import argparse
 from contextlib import closing, contextmanager
 import hmac
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tomllib
+import time
 
 from aiohttp import web
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -239,10 +241,15 @@ def service_lock(path):
 
 
 def main():
+    started = time.perf_counter()
+    def progress(stage):
+        print(f'[bridge startup] {stage} pid={os.getpid()} elapsed={time.perf_counter()-started:.2f}s', flush=True)
+    progress('python_entry')
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/bridge.local.toml")
     args = parser.parse_args()
     file = Path(args.config).resolve()
+    progress('reading_config')
     root = file.parent.parent
     settings = tomllib.loads(file.read_text(encoding="utf-8"))["bridge"]
     if settings.get("host", "127.0.0.1") != "127.0.0.1":
@@ -256,13 +263,16 @@ def main():
     if root not in state_root.parents:
         raise ValueError("group state must stay inside the bridge project")
     with service_lock(root / "var/service.lock"):
+        progress('initializing_bridge')
         bridge = Bridge(state_root, settings, engine, root / settings["persona_file"])
+        progress('binding_http')
         # Do not log tokens, request contents or query strings.
         web.run_app(
             create_app(bridge, token),
             host="127.0.0.1",
             port=settings.get("port", 8766),
             access_log=None,
+            print=lambda _message: progress('http_listening'),
         )
 
 

@@ -1,5 +1,11 @@
 # MYATRI-AstrBot STATUS
 
+## BRIDGE-STARTUP-COLD-REPORT（2026-10-22）
+
+用户启动时报Bridge did not start且stderr空。现场桥/reader已被失败清理，8766无监听，两份桥日志空，reader先前ready；服务单独import1.84s无异常。新增报告loop无初始yield，在aiohttp socket绑定前可能同步加载_application，重现健康响应前已加载报告的回归。修复先有失败测试再加1s让步（与原摘要worker一致），健康接口先可用。
+
+启动器改-u无缓冲、服务立即flush阶段/PID/耗时，90s等待、每5s进度、Refresh进程，区分提前退出(exit code)与alive超时并给stdout/stderr路径。未改凭据、任务或已核验进程清理范围。26项启动/报告/恢复通过16.16s；全Ruff/diff通过，--help即时阶段标记通过。无付费/群测试/生产重启，需正常重试启动器；详见 [诊断说明](../启动超时与空日志修复_2026-10-22.md)。
+
 ## HARNESS-DELEGATION-REPORT-LOOP（2026-10-22）
 
 按用户纠正，/pc任务恢复由主对话生成instructions并委派，宿主绑定原goal/当前owner与群；Harness执行结束后通过新增持久报告outbox自动将实际结果交回主角色，由主模型生成微信汇报，走原队列claim/逐段ack。主动闲聊关闭不影响任务汇报。任务详情新增chat_report，可看生成与真实投递状态；报告prepared/sent/unknown不会重建/重投，旧任务只每群补最新一项，不重跑历史任务。
