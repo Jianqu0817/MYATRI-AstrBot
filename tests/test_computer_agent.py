@@ -205,6 +205,77 @@ async def test_at_memory_request_reaches_real_native_shell_without_paid_model(tm
         await a.close()
 
 
+async def test_full_completion_errors_return_real_ids_and_allow_correction(tmp_path):
+    from myatri_bridge.computer_full import FullComputerTools
+    a = agent(tmp_path, profile='full')
+    a.desktop_lock.acquire()
+    s = source()
+    key = task_key(s)
+    try:
+        a.submit(s, key)
+        a.store.next()
+        a.store.claim_call(key, 'actual-native-id', 'pwsh', {})
+        a.store.receipt(key, 'actual-native-id', {'isError': False, 'value': {'exitCode': 0},
+                                                'content': [{'type': 'text', 'text': 'memory_bytes: 123'}]})
+        tools = FullComputerTools({'workspace': tmp_path}, a.store, key)
+        for n, checks in enumerate(([{'kind': 'receipt_success', 'call_id': 'pwsh-1'}], [])):
+            result = a._tool(key, {'name': 'finish_task', 'call_id': f'bad-{n}',
+                'args': {'status': 'completed', 'summary': '查询结束', 'checks': checks}}, tools, n + 1)
+            assert result['error'] == 'completion_verification_failed'
+            assert result['available_receipt_ids'] == ['actual-native-id']
+            assert result['end_turn'] is False and a.store.get(key)['state'] == 'running'
+        result = a._tool(key, {'name': 'finish_task', 'call_id': 'corrected',
+            'args': {'status': 'completed', 'summary': '查询已验证', 'checks': [
+                {'kind': 'receipt_contains', 'call_id': 'actual-native-id', 'text': 'memory_bytes'}]}}, tools, 4)
+        assert result['state'] == 'completed' and a.store.get(key)['state'] == 'completed'
+    finally:
+        a.desktop_lock.release()
+        await a.close()
+
+
+async def test_full_unverified_completion_stops_after_three_corrections(tmp_path):
+    from myatri_bridge.computer_full import FullComputerTools
+    a = agent(tmp_path, profile='full')
+    a.desktop_lock.acquire()
+    key = task_key(source())
+    try:
+        a.submit(source(), key)
+        a.store.next()
+        tools = FullComputerTools({'workspace': tmp_path}, a.store, key)
+        for n in range(3):
+            result = a._tool(key, {'name': 'finish_task', 'call_id': f'empty-{n}',
+                'args': {'status': 'completed', 'summary': 'model claim', 'checks': []}}, tools, n + 1)
+        assert result['state'] == 'blocked' and result['end_turn'] is True
+        assert '校验' in a.store.get(key)['summary'] and '不代表用户缺少授权' in a.store.get(key)['summary']
+    finally:
+        a.desktop_lock.release()
+        await a.close()
+
+
+@pytest.mark.skipif(not NODE.exists(), reason='isolated Harness not installed')
+async def test_real_harness_fixes_completion_reference_without_repeating_shell(tmp_path):
+    a = agent(tmp_path, [
+        tool_response('pwsh', {'description': 'Read memory',
+            'command': '[pscustomobject]@{memory_bytes=(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory} | ConvertTo-Json -Compress'}, 'real-memory-id'),
+        tool_response('finish_task', {'status': 'completed', 'summary': '查询结束',
+            'checks': [{'kind': 'receipt_success', 'call_id': 'pwsh-1'}]}, 'wrong-id'),
+        tool_response('finish_task', {'status': 'completed', 'summary': '查询结束', 'checks': []}, 'empty-check'),
+        tool_response('finish_task', {'status': 'completed', 'summary': '已验证内存查询',
+            'checks': [{'kind': 'receipt_contains', 'call_id': 'real-memory-id', 'text': 'memory_bytes'}]}, 'right-id'),
+    ], profile='full')
+    key = task_key(source())
+    try:
+        a.submit(source(), key)
+        assert (await wait_state(a, key, {'completed', 'blocked', 'unknown'}))['state'] == 'completed', a.store.details(key)
+        receipts = a.store.details(key)['receipts']
+        assert len(receipts) == 4 and a.store.receipt_ids(key) == ['real-memory-id']
+        response = json.loads(a.provider.requests[2].messages[-1]['content'])
+        assert response['host_receipt_id'] == 'wrong-id'
+        assert 'real-memory-id' in response['result']
+    finally:
+        await a.close()
+
+
 @pytest.mark.skipif(not NODE.exists(), reason="isolated Harness runtime not installed")
 async def test_real_harness_file_roundtrip_and_shared_budget(tmp_path):
     a = agent(

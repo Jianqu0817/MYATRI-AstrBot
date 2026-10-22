@@ -283,6 +283,7 @@ class Bridge:
             context.protocol_store = app.queue
             context.group_scope, context.delivery_path = message.scope, self.path
             context.identities, context.short_memory = self.identities, self.short_memory
+            context.computer_tasks = self.computer_agent.store
             context.topics = self.topics
             context.cold_archive = self.cold_archive
             context.dialogue_turns = self.config.get("dialogue_turns", 80)

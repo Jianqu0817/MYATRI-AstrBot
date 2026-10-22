@@ -4,6 +4,7 @@ from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 import time
 
@@ -57,6 +58,67 @@ class TaskStore:
         if row is None:
             raise ValueError("unconfirmed_receipt")
         return json.loads(row[0])
+
+    def receipt_ids(self, task):
+        """Actual native receipts, excluding finish/error receipts as evidence."""
+        with self.db() as db:
+            rows = db.execute("SELECT call_id,result FROM receipts WHERE task=? AND state='completed' "
+                              "ORDER BY rowid DESC", (task,)).fetchall()
+        return [r[0] for r in rows if isinstance(json.loads(r[1] or '{}').get('isError'), bool)][:12]
+
+    def completion_errors(self, task):
+        with self.db() as db:
+            rows = db.execute("SELECT result FROM receipts WHERE task=?", (task,)).fetchall()
+        return sum(json.loads(r[0] or '{}').get('error') == 'completion_verification_failed' for r in rows)
+
+    def feedback(self, owner, scope):
+        """Bounded internal CC; no raw terminal output, file content or reasoning."""
+        def text(value, limit):
+            value = re.sub(r"(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})",
+                           "[已隐藏密钥]", str(value))
+            value = re.sub(r"(?i)Bearer\s+\S+", "Bearer [已隐藏]", value)
+            return value[:limit]
+
+        reports = []
+        with self.db() as db:
+            rows = db.execute("SELECT id,goal,state,summary,updated FROM tasks WHERE owner=? AND scope=? "
+                              "ORDER BY updated DESC LIMIT 3", (owner, scope)).fetchall()
+            for task, goal, state, summary, updated in rows:
+                actions = []
+                for (payload,) in db.execute("SELECT payload FROM events WHERE task=? ORDER BY seq DESC LIMIT 100", (task,)):
+                    event = json.loads(payload)
+                    if event.get('type') != 'tool/call':
+                        continue
+                    data = event.get('data', {})
+                    if data.get('name') == 'finish_task':
+                        continue
+                    args = data.get('arguments', {})
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except ValueError:
+                            args = {}
+                    if not isinstance(args, dict):
+                        args = {}
+                    receipt = db.execute('SELECT state,result FROM receipts WHERE task=? AND call_id=?',
+                                         (task, data.get('callId', ''))).fetchone()
+                    result = json.loads(receipt[1] or '{}') if receipt else {}
+                    value = result.get('value') or {}
+                    actions.append({'tool': text(data.get('name', ''), 80),
+                                    'purpose': text(args.get('description', ''), 120),
+                                    'receipt_state': receipt[0] if receipt else 'unconfirmed',
+                                    'is_error': result.get('isError'),
+                                    'exit_code': value.get('exitCode') if isinstance(value, dict) else None})
+                    if len(actions) == 4:
+                        break
+                last = db.execute("SELECT result FROM receipts WHERE task=? AND state='completed' "
+                                  "ORDER BY rowid DESC LIMIT 1", (task,)).fetchone()
+                last = json.loads(last[0] or '{}') if last else {}
+                reports.append({'task_id': task, 'goal': text(goal, 300), 'state': state,
+                                'summary': text(summary, 1000), 'updated': updated,
+                                'verification': {k: last[k] for k in ('state', 'error', 'reason', 'checks') if k in last},
+                                'recent_actions': list(reversed(actions))})
+        return reports
 
     def recover(self):
         with self.db() as db:

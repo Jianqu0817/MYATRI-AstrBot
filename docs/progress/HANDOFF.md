@@ -1,5 +1,13 @@
 # MYATRI-AstrBot HANDOFF
 
+## HARNESS-COMPLETION-AND-FEEDBACK（2026-10-22）
+
+本轮简单修复生产任务错误call_id/空checks：ComputerAgent._model对工具反馈加host_receipt_id（原canonical journal不改），full finish失败返回completion_verification_failed、最近12实际native回执ID、纠正建议，前两次不end_turn，第三次blocked+明确校验原因；同call_id持久去重与pause/cancel优先保留。不能通过清空checks绕过验证，后台/非零退出校验不变。FULL_FINISH描述对旧恢复会话也给真实ID提示，新prompt原文/hash仅新任务使用，bounded合同不扩权。
+
+TaskStore.feedback提供同owner+scope最近3任务/每项4个动作的CC，GroupContextBuilder在每轮owner人类同群上下文内读取。含目标、summary、回执状态/退出码和verification；排除完整命令/原stdout/文件/推理，明显key/Bearer遮蔽。仅内部system资料，提醒非指令/时间快照/不主动群外发，预算过满可删减。context.computer_tasks在Bridge._application绑定，只复制只读投影，不伪造消息/永久记忆。当前生产内存结果已经只读验证可纳入。其他成员/群不注入，不能通过昵称越权。
+
+84项控制执行监视reset通过28.69秒、27项执行富上下文通过173.87秒（重叠）；最终新增4项复验通过3.03秒。真实Harness fixture错ID->空checks->正确ID完成且仅一个pwsh；3次错误停车、CC更新/隔离通过。Ruff/diff/JS与实机8767GET新文案通过，没有全suite/付费请求/群发送/生产任务重跑/旧状态改写。执行与CC需用户正常重启加载，下一次正常主对话才读到；监视刷新即生效。此前自动审批拒绝重启，本轮未绕过重试。不要宣称小温暖当前已经读过CC。
+
 ## HARNESS-CHAT-ADMISSION-FIX（2026-10-22）
 
 用户反馈电脑任务被回答做不到。先读 [本轮诊断](../Harness聊天接单修复_2026-10-22.md)。三次实际请求未进入执行库：本机两处owner pin相同但少于原始渠道ID一个尾字符；带微信@前缀也不被原is_command识别。按用户明确指认的原始失败操作修正两处本地精确pin，备份/源消息证据留ignored var；禁止从昵称自动绑定或给ID做模糊匹配。

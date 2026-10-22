@@ -268,8 +268,15 @@ class ComputerAgent:
         limits = json.loads(row["contract"])["limits"]
         if row["state"] != "running" or row["calls"] >= limits["calls"]:
             return {"error": "task_stopped_or_call_limit"}
+        messages = model_messages(options["messages"])
+        for message in messages:
+            if message['role'] == 'tool':
+                # Put the canonical ID next to the result, so the model need not
+                # infer a label such as pwsh-1 from its own prose.
+                message['content'] = json.dumps({'host_receipt_id': message['tool_call_id'],
+                    'result': message['content']}, ensure_ascii=False)
         request = ModelRequest(
-            messages=model_messages(options["messages"]),
+            messages=messages,
             tools=[
                 {"type": "function", "function": t} for t in options.get("tools", [])
             ],
@@ -345,7 +352,30 @@ class ComputerAgent:
         try:
             tools.deadline = time.monotonic() + 20
             if name == "finish_task":
-                checks = [tools.verify(check) for check in args["checks"]]
+                if isinstance(tools, FullComputerTools) and args['status'] == 'completed':
+                    checks = []
+                    for check in args['checks']:
+                        try:
+                            checks.append(tools.verify(check))
+                        except (ValueError, KeyError, OSError):
+                            checks.append({'kind': check['kind'], 'passed': False,
+                                           'error': 'check_or_receipt_not_found'})
+                    if not checks or not all(c['passed'] for c in checks):
+                        failures = self.store.completion_errors(task) + 1
+                        result = {'error': 'completion_verification_failed', 'checks': checks,
+                                  'available_receipt_ids': self.store.receipt_ids(task),
+                                  'suggestion': '修正完成检查后再次调用finish_task；从host_receipt_id或available_receipt_ids逐字复制真实call_id，不能编造pwsh-1；只需修正引用，不要重做已成功操作。空checks不能确认完成。',
+                                  'end_turn': failures >= 3}
+                        if failures >= 3:
+                            result['state'] = 'blocked'
+                            result['reason'] = 'completion_verification_failed'
+                            self.store.finish(task, packet['call_id'], result,
+                                args['summary'] + '\n宿主说明：完成校验连续失败，需修正回执引用或检查项，不代表用户缺少授权。')
+                        else:
+                            self.store.receipt(task, packet['call_id'], result)
+                        return result
+                else:
+                    checks = [tools.verify(check) for check in args["checks"]]
                 complete = (
                     args["status"] == "completed"
                     and bool(checks)

@@ -92,3 +92,34 @@ async def test_default_window_settings_and_numeric_metrics(bridge, message):
     assert stats["timeline_deduplicated_messages"] == 10  # Unknown send remains timeline evidence only.
     assert stats["components"]["timeline_and_current"]["messages"] == 1
     assert "token_budget" in stats["omission_reasons"]
+
+
+async def test_task_feedback_cc_is_fresh_owner_and_group_scoped(bridge, message, tmp_path):
+    from myatri_bridge.computer_tasks import TaskStore
+    bridge.identities.owner_id = message.sender_id
+    app, timeline = seeded(bridge, message, count=2)
+    store = TaskStore(tmp_path / 'computer.sqlite3')
+    app.conversation.context.computer_tasks = store
+    store.create('a' * 64, message.sender_id, message.scope, '查询内存', {}, 'hash')
+    store.state('a' * 64, 'completed', '抄送结果：可用内存6.98GB')
+    store.claim_call('a' * 64, 'native', 'pwsh', {})
+    store.receipt('a' * 64, 'native', {'isError': False, 'stdout': 'PRIVATE_RAW_STDOUT'})
+    store.event('a' * 64, {'type': 'tool/call', 'seq': 0,
+        'data': {'name': 'pwsh', 'callId': 'native', 'arguments': json.dumps({
+            'description': '查询内存容量', 'command': 'PRIVATE_RAW_COMMAND'})}})
+    messages, _ = build(app, message, timeline)
+    cc = next(m['content'] for m in messages if m['content'].startswith('电脑任务反馈'))
+    assert '可用内存6.98GB' in cc and '查询内存容量' in cc
+    assert 'PRIVATE_RAW_STDOUT' not in cc and 'PRIVATE_RAW_COMMAND' not in cc
+    # New results appear without writing or fabricating a human/group message.
+    store.state('a' * 64, 'completed', '抄送更新：可用内存7.2GB')
+    messages, _ = build(app, message, timeline)
+    assert any('可用内存7.2GB' in m['content'] for m in messages)
+    messages, _ = build(app, message, timeline, sender_id='imposter', sender_name='菅蘧')
+    assert not any(m['content'].startswith('电脑任务反馈') for m in messages)
+    other = message.model_copy(update={'group_id': 'room2'})
+    other_app = bridge._application(other)
+    other_app.conversation.context.computer_tasks = store
+    messages, _ = build(other_app, other, [])
+    assert not any(m['content'].startswith('电脑任务反馈') for m in messages)
+    assert len(app.store.list_records('raw_message')) == 4
