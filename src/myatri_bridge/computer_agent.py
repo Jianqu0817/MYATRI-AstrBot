@@ -263,7 +263,7 @@ class ComputerAgent:
             await self.process.wait()
         self.process = None
 
-    async def _model(self, task, options):
+    async def _model(self, task, options, *, completion_only=False):
         row = self.store.get(task)
         limits = json.loads(row["contract"])["limits"]
         if row["state"] != "running" or row["calls"] >= limits["calls"]:
@@ -311,6 +311,22 @@ class ComputerAgent:
             return {"error": "model_unavailable_or_budget_exhausted"}
         charged = gateway._charged_tokens(response, estimate)
         self.store.charge(task, 0, charged - estimate)
+        if completion_only and any(c['function']['name'] != 'finish_task' for c in response.tool_calls):
+            return {'error': 'finish_task_required_no_new_actions'}
+        if json.loads(row['contract']).get('profile') == 'full' and not response.tool_calls:
+            if response.content:
+                self.store.save_draft(task, response.content)
+            if not completion_only:
+                # One bounded, budgeted closure request; expose only finish_task
+                # so a missing completion call cannot rerun successful actions.
+                closure = {'role': 'user', 'content': [{'type': 'text', 'text':
+                    '宿主收尾提醒：报告已经保留，但任务尚未完成校验。现在只调用finish_task，'
+                    '用真实回执核验并总结；不要重新执行命令。不能验证则说明具体原因并用blocked。'
+                    '真实回执ID：' + json.dumps(self.store.receipt_ids(task))}]}
+                return await self._model(task, {'tools': [FULL_FINISH], 'messages': [
+                    *options['messages'],
+                    {'role': 'assistant', 'content': [{'type': 'text', 'text': response.content or ''}]},
+                    closure]}, completion_only=True)
         blocks = []
         if response.content:
             blocks.append({"type": "text", "text": response.content})
@@ -560,12 +576,14 @@ class ComputerAgent:
                 await asyncio.gather(read_task, return_exceptions=True)
         state = self.store.get(task)["state"]
         if state in {"running", "pausing", "cancelling"}:
+            draft = self.store.get(task)['summary']
             self.store.state(
                 task,
                 {"running": "blocked", "pausing": "paused", "cancelling": "cancelled"}[
                     state
                 ],
-                "执行回合已停止；以工具回执及独立检查为准。",
+                (draft + '\n宿主说明：执行回合已停止，尚未提交有效完成校验；以上为未验证报告。')
+                if state == 'running' and draft else "执行回合已停止；以工具回执及独立检查为准。",
             )
 
     async def loop(self):

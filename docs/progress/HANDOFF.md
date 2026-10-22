@@ -1,5 +1,11 @@
 # MYATRI-AstrBot HANDOFF
 
+## HARNESS-MISSING-FINISH（2026-10-22）
+
+用户贴5/25,190为旧11:50任务；12:07还有新任务两次pwsh成功、第三次仅文本报告，缺finish导致通用blocked。ComputerAgent._model新增completion_only内参：full纯文本先TaskStore.save_draft（WHERE running，仅改summary，不覆写pause），再仅一次递归同gateway模型收尾，tools仅FULL_FINISH；host提示真实ID、不重执行。每次仍独立正常预留/计费、调用上限、超时与不重试；收尾若发其他工具拒绝，不会进入native调度。若再纯文本则保留draft，run兜底blocked时附未完成校验说明。没有按退出码自动宣称任务完成，也没有重放生产任务。
+
+TaskStore.report_summary仅对旧通用停止摘要，取canonical最近100事件中的实际assistant/message文本，标未验证；details与owner反馈投影复用。原summary/state/calls/tokens/events不改，已只读验证当前旧新任务可取8.90报告。新fixture实测只运行一次shell即可补finish完成；重复纯文本最多一次收尾后停车保报告；旧记录投影不改历史。最终电脑相关65项通过29.45秒，包含重点3项，不相加；Ruff/diff通过，未跑完整suite。代码需用户正常重启加载，未重试/绕过此前的自动审批拒绝。
+
 ## HARNESS-COMPLETION-AND-FEEDBACK（2026-10-22）
 
 本轮简单修复生产任务错误call_id/空checks：ComputerAgent._model对工具反馈加host_receipt_id（原canonical journal不改），full finish失败返回completion_verification_failed、最近12实际native回执ID、纠正建议，前两次不end_turn，第三次blocked+明确校验原因；同call_id持久去重与pause/cancel优先保留。不能通过清空checks绕过验证，后台/非零退出校验不变。FULL_FINISH描述对旧恢复会话也给真实ID提示，新prompt原文/hash仅新任务使用，bounded合同不扩权。

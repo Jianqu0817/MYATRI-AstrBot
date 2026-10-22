@@ -71,6 +71,25 @@ class TaskStore:
             rows = db.execute("SELECT result FROM receipts WHERE task=?", (task,)).fetchall()
         return sum(json.loads(r[0] or '{}').get('error') == 'completion_verification_failed' for r in rows)
 
+    def save_draft(self, task, text):
+        with self.db() as db:
+            db.execute("UPDATE tasks SET summary=? WHERE id=? AND state='running'", (text[:1000], task))
+
+    def report_summary(self, task, summary):
+        if not summary.startswith('执行回合已停止；以工具回执及独立检查为准。'):
+            return summary
+        with self.db() as db:
+            for (payload,) in db.execute('SELECT payload FROM events WHERE task=? ORDER BY seq DESC LIMIT 100', (task,)):
+                event = json.loads(payload)
+                if event.get('type') != 'assistant/message':
+                    continue
+                blocks = event.get('data', {}).get('message', {}).get('content', [])
+                text = blocks if isinstance(blocks, str) else '\n'.join(
+                    b.get('text', '') for b in blocks if isinstance(b, dict) and b.get('type') == 'text')
+                if text.strip():
+                    return '执行报告（尚未完成校验，摘自原始会话记录）：\n' + text[:1000]
+        return summary
+
     def feedback(self, owner, scope):
         """Bounded internal CC; no raw terminal output, file content or reasoning."""
         def text(value, limit):
@@ -115,7 +134,7 @@ class TaskStore:
                                   "ORDER BY rowid DESC LIMIT 1", (task,)).fetchone()
                 last = json.loads(last[0] or '{}') if last else {}
                 reports.append({'task_id': task, 'goal': text(goal, 300), 'state': state,
-                                'summary': text(summary, 1000), 'updated': updated,
+                                'summary': text(self.report_summary(task, summary), 1000), 'updated': updated,
                                 'verification': {k: last[k] for k in ('state', 'error', 'reason', 'checks') if k in last},
                                 'recent_actions': list(reversed(actions))})
         return reports
@@ -259,6 +278,7 @@ class TaskStore:
 
     def details(self, task):
         row = self.get(task)
+        row['summary'] = self.report_summary(task, row['summary'])
         with self.db() as db:
             receipts = [
                 {

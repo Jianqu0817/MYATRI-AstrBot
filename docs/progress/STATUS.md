@@ -1,5 +1,11 @@
 # MYATRI-AstrBot STATUS
 
+## HARNESS-MISSING-FINISH（2026-10-22）
+
+用户贴出的5次/25,190Token是原11:50旧任务，历史状态没有改写。同时发现12:07新任务已查询出可用8.90GB，却只输出普通报告而未调finish_task，原回合兜底把报告盖成通用blocked。现full模型首次只回文本时先CAS保留1000字报告，再最多补一次仅暴露finish_task的收尾请求；继续受原调用/Token账本、停止状态及零provider重试约束，禁止收尾响应夹带其他工具，不能重新运行命令。仍缺校验则保留未验证报告与具体说明，不假装完成。旧bounded流程不变。
+
+TaskStore.details/feedback对旧通用停止摘要可从真实canonical assistant/message只读提取报告并标未验证，支持旧任务结果在面板及owner内部抄送中可见，不修改原状态/计数/事件。已对当前12:07原记录只读验证可投影8.90GB。最终电脑相关65项通过29.45秒，重点3项包含其中不相加；Ruff/diff通过，无全suite/付费验收/生产重放。执行及投影代码需正常重启后加载，未绕过此前被拒绝的重启。
+
 ## HARNESS-COMPLETION-AND-FEEDBACK（2026-10-22）
 
 用户要求简单修复“需要补充条件”，并让小温暖收到执行内容和反馈。真实任务已执行，但模型自造pwsh-1后又空checks导致blocked。现执行工具反馈附真实host_receipt_id，full完成验证失败返回可用ID与纠正提示，前两次保持回合、第三次明确校验错误后停车，绝不空检查认定成功。bounded旧行为不改；界面blocked改“执行受阻（详见摘要与回执）”。
