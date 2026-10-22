@@ -113,7 +113,8 @@ class ComputerAgent:
     def submit(self, source, task_id):
         if not self.enabled or not self.computer.authorized(source):
             return {"error": "computer_owner_required"}
-        command = source["text"].strip()[3:].strip()
+        from .computer_control import command_body
+        command = command_body(source["text"])
         scope = digest([source["platform_id"], source["bot_id"], source["group_id"]])[
             :32
         ]

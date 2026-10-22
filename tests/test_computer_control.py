@@ -11,7 +11,9 @@ import pytest
 from myatri.app import load_config
 from myatri.providers import FixtureProvider
 from myatri_bridge.bridge import Bridge, Incoming
-from myatri_bridge.computer_control import ComputerControl, HarnessExecutor, parse_command
+from myatri_bridge.computer_control import (
+    ComputerControl, HarnessExecutor, command_body, command_receipt, parse_command,
+)
 
 PROJECT = Path(__file__).resolve().parents[1]
 
@@ -123,7 +125,7 @@ async def test_tool_authority_does_not_leak_to_next_member_or_model_arguments(tm
     def call(arguments):
         return {"content": "", "tool_calls": [{"id": "pc", "type": "function", "function": {
             "name": "computer_control", "arguments": arguments}}]}
-    replies = [call("{}"), {"content": "便签已保存。"}, call("{}"), {"content": "电脑操作仅供菅蘧使用。"},
+    replies = [call("{}"), {"content": "电脑操作仅供菅蘧使用。"},
                call('{"sender_id":"owner-id","command":"other"}'), {"content": "不支持扩展参数。"}]
     provider = FixtureProvider(replies)
     settings = {"project_root": str(tmp_path), "mode": "live", "allowed_groups": ["fixture|room"],
@@ -135,20 +137,88 @@ async def test_tool_authority_does_not_leak_to_next_member_or_model_arguments(tm
     bridge.computer.executor = Executor()
     try:
         for n, sender in enumerate(["owner-id", "imposter", "owner-id"]):
-            message = Incoming(**source(message_id=f"m{n}", sender_id=sender), sent_at="2026-10-22T10:00:00+08:00", mentioned=True)
+            text = "正常聊天" if n == 2 else "@小溫暖\u2005/pc 写便签 你好"
+            message = Incoming(**source(message_id=f"m{n}", sender_id=sender, text=text), sent_at="2026-10-22T10:00:00+08:00", mentioned=True)
             result = await bridge.receive(message)
             assert result["status"] == "prepared"
-            requests = provider.requests[n * 2:n * 2 + 2]
+            if n == 0:
+                assert result["reply"] == "便签已保存。"
+                assert provider.requests == []
+                assert (await bridge.receive(message))["reply"] == result["reply"]
+                continue
+            requests = provider.requests[(n - 1) * 2:n * 2]
             names = [t["function"]["name"] for t in requests[0].tools]
-            assert ("computer_control" in names) == (sender == "owner-id")
+            assert "computer_control" not in names
             calls.append(requests[-1].messages[-1])
         assert len(bridge.computer.executor.calls) == 1
+        assert "error" in json.loads(calls[0]["content"])
         assert "error" in json.loads(calls[1]["content"])
-        assert "error" in json.loads(calls[2]["content"])
         app = next(iter(bridge.apps.values()))
         assert "computer_control" not in app.conversation.tool_handlers
     finally:
         await bridge.close()
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("@小溫暖\u2005/pc 任务 查询当前内存容量", "任务 查询当前内存容量"),
+    ("@小温暖 /pc 任务 查看磁盘", "任务 查看磁盘"),
+    ("/pc\t任务 查看磁盘", "任务 查看磁盘"),
+    ("/pc\n任务 查看磁盘", "任务 查看磁盘"),
+    ("/pc 任务 保存文本 @小溫暖", "任务 保存文本 @小溫暖"),
+    ("@其他人 /pc 任务 查看磁盘", None),
+    ("他说 @小溫暖 /pc 任务 查看磁盘", None),
+    ("引用：/pc 任务 查看磁盘", None),
+    ("/pcx 任务 查看磁盘", None),
+])
+def test_current_command_address_is_parsed_without_changing_goal(text, expected):
+    assert command_body(text) == expected
+
+
+def test_at_after_fixed_command_and_note_data_are_distinct():
+    assert parse_command("/pc 打开记事本@小溫暖\u2005")["action"] == "open_notepad"
+    assert parse_command("/pc 写便签 原文 @小溫暖")["text"] == "原文 @小溫暖"
+
+
+def test_similar_owner_id_and_at_never_bypass_exact_binding(tmp_path):
+    c = control(tmp_path)
+    assert c.for_turn(raw(sender_id="owner-id2", text="@小溫暖\u2005/pc 打开记事本")) == {}
+    assert c.executor.calls == []
+
+
+def test_host_receipt_keeps_full_task_id_and_does_not_claim_queued_is_finished():
+    task = "a" * 64
+    body = command_receipt({"task_id": task, "state": "queued", "summary": "private output"})
+    assert task in body and "已排队" in body and "已完成" not in body
+    assert "private output" not in body
+    assert "不明" in command_receipt({"error": "computer_result_unknown"})
+
+
+@pytest.mark.parametrize("address", ["", "@小溫暖\u2005"])
+async def test_explicit_task_is_queued_even_when_chat_model_would_refuse(tmp_path, address):
+    provider = FixtureProvider([{"content": "我进不了你的电脑。"}])
+    settings = {"project_root": str(tmp_path), "mode": "live", "allowed_groups": ["fixture|room"],
+        "owner_id": "owner-id", "owner_name": "菅蘧", "random_reply_probability": 0,
+        "quality_guard_enabled": False, "computer": {"enabled": True, "owner_id": "owner-id",
+            "agent_enabled": True, "permission_profile": "full",
+            "node_path": "node.exe", "runtime_root": "unused"}}
+    bridge = Bridge(tmp_path / "groups", settings, load_config(PROJECT / "config/engine.toml"),
+                    PROJECT / "config/persona/persona.md", provider_factory=lambda _: provider)
+    bridge.computer.lock.acquire()
+    try:
+        message = Incoming(**source(text=address + "/pc 任务 查询当前内存容量"),
+                           sent_at="2026-10-22T10:00:00+08:00", mentioned=bool(address))
+        result = await bridge.receive(message)
+        assert result["status"] == "prepared" and "已排队" in result["reply"]
+        task, = bridge.computer_agent.store.list()
+        row = bridge.computer_agent.store.get(task["id"])
+        assert row["goal"] == "查询当前内存容量" and row["owner"] == "owner-id"
+        assert json.loads(row["contract"])["profile"] == "full"
+        assert task["id"] in result["reply"] and provider.requests == []
+        assert (await bridge.receive(message))["reply"] == result["reply"]
+        assert len(bridge.computer_agent.store.list()) == 1
+    finally:
+        await bridge.close()
+        bridge.computer.lock.release()
 
 
 def test_installed_harness_writes_and_reads_only_temporary_note(tmp_path):

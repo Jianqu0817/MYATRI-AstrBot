@@ -1,5 +1,13 @@
 # MYATRI-AstrBot HANDOFF
 
+## HARNESS-CHAT-ADMISSION-FIX（2026-10-22）
+
+用户反馈电脑任务被回答做不到。先读 [本轮诊断](../Harness聊天接单修复_2026-10-22.md)。三次实际请求未进入执行库：本机两处owner pin相同但少于原始渠道ID一个尾字符；带微信@前缀也不被原is_command识别。按用户明确指认的原始失败操作修正两处本地精确pin，备份/源消息证据留ignored var；禁止从昵称自动绑定或给ID做模糊匹配。
+
+computer_control.command_body统一识别当前原话开头的/pc与@小温暖/@小溫暖+空白；固定打开/读取兼容尾@，便签与目标正文不删改。ComputerAgent.submit使用同一解析器。ReadingConversation在当轮owner handler存在且工具开启时直接dispatch，不再请主聊天LLM选择；保持raw/answer/协议/on_answer，主对话接单零API请求。回执只取真实状态及完整64位ID，元数据过滤到task_id/state/status/error；private输出留本机。原消息去重、持久claim与unknown不重放保留。不重放历史失败消息或发群测试；只读验证三个原始信封修复后均可接单。
+
+完整543项通过370.11秒，最终电脑控制/执行59项通过24.25秒（数字重叠；后者含完整回归启动后新增的实机内存用例），真实Harness离线fixture读取物理内存并通过回执检查。Ruff与diff通过。本轮重启命令被自动审批拒绝，只有blocked by policy原因，整条命令未执行。生产尚未加载，不绕过拒绝改用其他杀进程方式。用户需正常重新运行Start-WeChat-Live.cmd；没有停止微信、AstrBot、reader、monitor，也没有自动重放旧任务。
+
 ## FULL-HARNESS-AND-DUAL-PORT（2026-10-22）
 
 最新范围由用户明确扩展：AstrBot先完成通用执行，再将可移植功能接回MYATRI0.3.0并推两库main；只在桥版加唤醒持续关注。先读 [本轮说明](../Harness通用执行与双仓迁移_2026-10-22.md)。native-tools.mjs挂官方fs-local/pwsh-local/subprocess-local/jobs/workingDirectory/skills；工具consumer在agent scope挂载，catalog必须用schemas(scopeOf(agentCtx))，否则得到空表并错误拒绝调用。中间层tools/execute先宿主claim再next，规范结果持久化，shared provider请求留Python。MCP配置走被忽略executor.local.json，sample与lock公开；没有注入聊天Key，但full不是OS沙箱，命令享有当前用户可访问能力。

@@ -177,6 +177,35 @@ async def test_owner_scope_dedupe_and_no_group_private_results(tmp_path):
 
 
 @pytest.mark.skipif(not NODE.exists(), reason="isolated Harness runtime not installed")
+async def test_at_memory_request_reaches_real_native_shell_without_paid_model(tmp_path):
+    a = agent(tmp_path, [
+        tool_response("pwsh", {
+            "description": "Read physical memory capacity",
+            "command": "[pscustomobject]@{memory_bytes=(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory} | ConvertTo-Json -Compress",
+        }, "memory-query"),
+        tool_response("finish_task", {
+            "status": "completed", "summary": "已用系统接口查询内存容量，数据留本机回执。",
+            "checks": [{"kind": "receipt_success", "call_id": "memory-query"},
+                       {"kind": "receipt_contains", "call_id": "memory-query", "text": "memory_bytes"}],
+        }, "memory-finish"),
+    ], profile="full")
+    s = source(text="@小溫暖\u2005/pc 任务 查询当前内存容量")
+    key = task_key(s)
+    try:
+        raw = SimpleNamespace(author_kind="human", payload={"channel_source": s})
+        receipt = await a.computer.for_turn(raw)["computer_control"][1]()
+        assert receipt["task_id"] == key and "memory_bytes" not in json.dumps(receipt)
+        row = await wait_state(a, key, {"completed", "blocked", "unknown"})
+        assert row["state"] == "completed", a.store.details(key)
+        assert row["goal"] == "查询当前内存容量"
+        actual = a.store.result(key, "memory-query")
+        assert actual["isError"] is False and "memory_bytes" in json.dumps(actual)
+        assert len(a.provider.requests) == 2
+    finally:
+        await a.close()
+
+
+@pytest.mark.skipif(not NODE.exists(), reason="isolated Harness runtime not installed")
 async def test_real_harness_file_roundtrip_and_shared_budget(tmp_path):
     a = agent(
         tmp_path,

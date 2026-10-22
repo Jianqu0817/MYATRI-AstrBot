@@ -92,6 +92,32 @@ class ReadingConversation(Conversation):
             saved = self.protocol_store.get_protocol(raw.record_id) if self.protocol_store else None
             if saved and saved["status"] == "context_reset":
                 raise ProviderError("turn belongs to a cleared context; use a new message ID")
+            if self.enable_tools and "computer_control" in handlers:
+                # /pc is already an exact, owner-bound host command. Dispatch it
+                # once without asking the chat model whether it has this ability.
+                # The independent Harness agent still plans and executes the goal.
+                from .computer_control import command_receipt
+                result = handlers["computer_control"][1]()
+                if inspect.isawaitable(result):
+                    result = await result
+                body = command_receipt(result)
+                answer = self.store.append_message("assistant", body,
+                    message_id="answer_" + raw.record_id, reply_to=raw.ref,
+                    provider="host", model="computer-command", reply_parts=[body],
+                    computer_command_receipt={k: result[k] for k in
+                        ("task_id", "state", "status", "error") if k in result})
+                if self.protocol_store:
+                    self.protocol_store.save_protocol(raw.record_id, {
+                        "status": "completed", "steps": 0, "reply_ref": answer.ref,
+                        "sent_at": raw.created_at, "replied_at": answer.created_at,
+                        "computer_command": True, "full_checkpoint": False,
+                        "tool_audit": [], "reading_guard": None,
+                        "latency": {"total_seconds": round(time.perf_counter()-started, 4),
+                                    "model_seconds": 0.0},
+                    })
+                if self.on_answer:
+                    self.on_answer(answer)
+                return answer
             if saved and saved["status"] == "active":
                 messages, snapshot, start_step = saved["messages"], saved["snapshot"], saved["steps"]
                 turn_stats = deepcopy(saved.get("context_stats", {}))

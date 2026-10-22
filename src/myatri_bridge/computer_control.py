@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import threading
@@ -35,23 +36,67 @@ RULES += ('对于 /pc 任务，调用只提交宿主绑定目标的执行任务�
 HELP = "/pc 打开记事本；/pc 写便签 内容；/pc 读便签；/pc 任务 目标；/pc 状态|暂停|继续|取消 完整任务号"
 
 
+def command_body(text):
+    """Recognize a current command, optionally addressed to our exact bot names.
+
+    This parses text only; it never authenticates a sender or changes the archived
+    transport envelope. Do not search for commands in prose, quotes or history.
+    """
+    if not isinstance(text, str):
+        return None
+    text = re.sub(r"^\s*(?:@(?:小温暖|小溫暖)\s+)+", "", text).lstrip()
+    if text == "/pc":
+        return ""
+    if text.startswith("/pc") and len(text) > 3 and text[3].isspace():
+        return text[3:].strip()
+    return None
+
+
 def is_command(text):
-    return isinstance(text, str) and (text.strip() == "/pc" or text.lstrip().startswith(("/pc ", "/pc\n")))
+    return command_body(text) is not None
 
 
 def parse_command(text):
-    if not is_command(text):
+    command = command_body(text)
+    if command is None:
         return None
-    command = text.strip()[3:].strip()
-    if command == "打开记事本":
+    # WeChat also allows At after a fixed command. Never strip note/goal data.
+    fixed = re.sub(r"(?:\s*@(?:小温暖|小溫暖)\s*)+$", "", command)
+    if fixed == "打开记事本":
         return {"action": "open_notepad", "text": ""}
-    if command == "读便签":
+    if fixed == "读便签":
         return {"action": "read_note", "text": ""}
     if command.startswith("写便签 ") or command.startswith("写便签\n"):
         note = command[3:].strip()
         if note and len(note) <= 1000 and "\x00" not in note:
             return {"action": "write_note", "text": note}
     return None
+
+
+def command_receipt(result):
+    """Render host-confirmed status without exposing executor output to a group."""
+    if "error" in result:
+        reasons = {
+            "unsupported_computer_command": "命令格式不支持。" + HELP,
+            "computer_task_state_conflict": "当前任务状态不支持这项操作，请在本机任务面板核对。",
+            "computer_result_unknown": "操作结果不明，未自动重试，请在本机核对。",
+            "computer_desktop_busy": "电脑执行器正忙，请稍后再试。",
+            "computer_queue_full": "电脑任务队列已满，请稍后提交。",
+            "task_not_found": "没有找到这个任务，请使用完整任务号。",
+            "invalid_task_id": "任务号格式不正确，请使用完整的64位任务号。",
+            "task_scope_denied": "这个任务不属于当前账号和群聊。",
+            "invalid_task_goal": "请在 /pc 任务 后填写目标，最多6000字。",
+        }
+        return reasons.get(result["error"], "电脑请求未成功受理，请在本机任务面板核对。")
+    if "task_id" in result:
+        states = {"queued": "已排队", "running": "执行中", "paused": "已暂停",
+                  "pausing": "正在暂停", "cancelling": "正在取消", "cancelled": "已取消",
+                  "completed": "已完成", "blocked": "执行受阻", "unknown": "结果不明，需本机核对"}
+        state = states.get(result.get("state"), "待核对")
+        return f"电脑任务：{state}\n任务号：{result['task_id']}\n详情见本机任务面板（8767）。"
+    return {"written": "便签已保存。", "read": "便签已读取，正文仅在本机保留。",
+            "launch_submitted": "已提交记事本启动，请在电脑上确认窗口。"}.get(
+                result.get("status"), "电脑操作已返回，请在本机核对结果。")
 
 
 class HarnessExecutor:
