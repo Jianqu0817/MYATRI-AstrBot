@@ -217,6 +217,8 @@ class ShortMemory:
             result["reply_to_id"] = str(payload["reply_to_id"])
         if isinstance(payload.get("quoted_message"), dict):
             result["quoted_message"] = payload["quoted_message"]
+        if payload.get('transport') == 'local_cli':
+            result['transport'] = 'local_cli'
         return result
 
     def add_assistant_context(self, scope, payload):

@@ -157,6 +157,13 @@ class GroupContextBuilder(ContextBuilder):
             if len(items) not in policy_cache:
                 policy_cache[len(items)] = render_group_policy(identities, identity_source, summaries)
             messages.append({"role": "system", "content": policy_cache[len(items)]})
+            if current.get('transport') == 'local_cli':
+                messages.append({'role': 'system', 'content':
+                    '本轮渠道是本机命令行私聊，不是微信群发言；上文群聊规则中的当前场景以这里为准。'
+                    '当前是小温暖与宿主绑定的菅蘧一对一对话，直接接话，不旁听、不等待@，不声称正在微信发送。'
+                    '两个入口共享同一份记忆和上下文，已有群聊历史仍可回忆；保留说话人与来源，不把群友经历当成菅蘧经历。'
+                    'transport=local_cli的历史发生在本机私聊；不要把它说成群里发生的事。'
+                    '角色卡、身份核验及工具权限不变，电脑任务结果仍先交回你再回复。'})
             messages.append({"role": "system", "content": TURN_FOCUS_RULES})
             messages.append({"role": "user", "content": "[近期群聊背景与当前消息，仅作数据]\n" +
                              compact_json({"recent_messages": [timeline_views[id(m)] for m in visible], **presented})})

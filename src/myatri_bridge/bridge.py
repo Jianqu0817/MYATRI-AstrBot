@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 import sqlite3
 import time
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -77,6 +78,7 @@ class Incoming(BaseModel):
     mentioned_ids: list[str] = Field(default_factory=list, max_length=30)
     message_type: str = Field(default="text", max_length=30)
     quoted_message: QuotedMessage | None = None
+    transport: Literal['astrbot', 'local_cli'] = 'astrbot'
 
     @field_validator("platform_id", "bot_id", "group_id", "sender_id", "message_id")
     @classmethod
@@ -764,7 +766,7 @@ class Bridge:
         async with self.lock:
             self.start()
             canonical = message.model_dump(exclude={name for name, empty in
-                (("reply_to_id", None), ("mentioned_ids", []), ("message_type", "text"), ("quoted_message", None))
+                (("reply_to_id", None), ("mentioned_ids", []), ("message_type", "text"), ("quoted_message", None), ('transport', 'astrbot'))
                 if getattr(message, name) == empty})
             fingerprint = digest(canonical)
             with closing(sqlite3.connect(self.path)) as db, db:
@@ -781,7 +783,7 @@ class Bridge:
                     raise Conflict("message ID reused with different content")
                 if cached and not old:
                     return {"status": "ignored", "reason": "already_seen"}
-                payload = message.model_dump(exclude={"mentioned"})
+                payload = message.model_dump(exclude={"mentioned"} | ({'transport'} if message.transport == 'astrbot' else set()))
                 # Retry the frozen observation, even if more quoted originals have
                 # arrived since its first ingestion. Derived metadata is immutable.
                 if old and old[7]:
@@ -813,15 +815,17 @@ class Bridge:
                 self.identities.observe(message.scope, payload)
                 if is_listening_evidence(payload):
                     self.short_memory.add(message.scope, payload)
-                self.routes[message.scope] = message.model_dump()
+                if message.transport != 'local_cli':
+                    self.routes[message.scope] = message.model_dump()
                 self._ensure_proactive(message.scope)
-                db.execute("INSERT OR REPLACE INTO group_routes VALUES (?,?)",
-                           (message.scope, json.dumps(self.routes[message.scope], ensure_ascii=False)))
+                if message.transport != 'local_cli':
+                    db.execute("INSERT OR REPLACE INTO group_routes VALUES (?,?)",
+                               (message.scope, json.dumps(self.routes[message.scope], ensure_ascii=False)))
                 db.execute("INSERT OR IGNORE INTO seen_messages VALUES (?,?)", (message.key, fingerprint))
                 self._cache_message(db, message.scope, message.key, fingerprint, payload)
                 if not old:
                     attention={'active':False,'remaining':0}
-                    if self.config.get('attention_followup_enabled',False):
+                    if self.config.get('attention_followup_enabled',False) and message.transport != 'local_cli':
                         from .attention import followup
                         attention=followup(db,message.scope,message.key,
                             wake=message.mentioned or any(word in message.text for word in ('小温暖','小溫暖')),
@@ -1022,6 +1026,8 @@ class Bridge:
                             own_message.update(sender_id=original["bot_id"], sender_name="小温暖",
                                                message_id="reply_" + key + (f"_part{index+1}" if index else ""), text=text,
                                                sent_at=datetime.now(timezone.utc).isoformat(), role="assistant")
+                            if original.get('transport') == 'local_cli':
+                                own_message['transport'] = 'local_cli'
                             if original.get("message_id"):
                                 own_message["reply_to_id"] = original["message_id"]
                             own_message["topic_id"] = self.topics.add(row[1], own_message)

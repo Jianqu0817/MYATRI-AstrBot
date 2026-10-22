@@ -16,6 +16,8 @@ def message_view(message):
         result["role"] = message["role"]
     if message.get("message_type") not in (None, "", "text"):
         result["message_type"] = message["message_type"]
+    if message.get('transport') == 'local_cli':
+        result['transport'] = 'local_cli'
     return result
 
 

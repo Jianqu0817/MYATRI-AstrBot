@@ -1,5 +1,11 @@
 # MYATRI-AstrBot HANDOFF
 
+## LOCAL-CLI-SHARED-LIBRARY（2026-10-22）
+
+用户明确撤回独立私聊网页/端口方案，改为命令行与原群模式互斥、同一记忆和上下文库。先读 [同库命令行入口](../命令行私聊与群聊同库_2026-10-22.md)。local_chat.py选择既有group_routes且白名单仍授权的scope，复用Bridge和原state_root/scope；不要另建private scope、复制档案或做跨库检索。Start-Local-Chat.cmd使用原配置，--offline只做测试；service.lock与server相同，不自动结束群服务。原库中的owner固定为终端人类来源，不凭昵称或原话认证。
+
+Incoming.transport默认astrbot，local_cli标记真实终端来源；默认字段从消息指纹排除，旁听/助手上下文及模型视图保留CLI标记。仅CLI当前轮追加私聊场景提示，不改人格记录；原群路由不被CLI覆盖，主动群发在CLI配置副本中禁用。Harness通过原wait/报告续接链路交给小温暖后才输出并ack，无微信发送。私聊仍在同一上下文，切回群模式可检索，要保留来源、避免主动披露私聊敏感内容。最低定向34项通过12.25秒，Ruff/diff/CLI帮助入口通过，不重跑全量；无生产启动/付费调用/微信测试消息。精确Git结果见本轮提交。
+
 ## HARNESS-SAME-TURN-RESULT（2026-10-22）
 
 本轮用户不接受独立Harness报告与聊天各自回答。先读 [本轮修复](../Harness同轮结果回传修复_2026-10-22.md)，它取代下方旧报告架构说明。computer_control身份核验不再要求/pc，自然owner提供可选instructions工具；明确/pc任务和直接硬件查询才强制委派，普通聊天不自动提交。ReadingConversation在调用前保存带真实call ID的完整工具协议，再通过before_submit登记等待；ComputerTaskPending使Bridge释放锁并返回内部等待态，插件不会发送它。
