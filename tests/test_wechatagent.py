@@ -7,6 +7,11 @@ import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from astrbot_plugin_myatri.wechat_versions import (  # noqa: E402
+    SUPPORTED,
+    spec_for,
+    supported_versions,
+)
 from astrbot_plugin_myatri.wechatagent_client import (  # noqa: E402
     NativeClient,
     NotReady,
@@ -244,8 +249,7 @@ async def test_event_identity_time_wake_and_rejection():
         await client.close()
 
 
-@pytest.mark.parametrize(
-    "url",
+@pytest.mark.parametrize("url",
     [
         "https://127.0.0.1",
         "http://localhost:5031",
@@ -257,3 +261,44 @@ async def test_event_identity_time_wake_and_rejection():
 def test_credentials_cannot_be_sent_to_other_origins(url):
     with pytest.raises(NotReady):
         loopback_origin(url)
+
+
+def test_version_table_loads_with_required_fields():
+    assert supported_versions(), "兼容表不能为空"
+    for version, spec in SUPPORTED.items():
+        assert spec.wechat_version == version
+        assert spec.client_dir.startswith("state/hook/wechat-")
+        assert spec.wechatagent_runtime
+        assert spec.integration == "WeChatAgent-1"
+        assert spec.backend == "wechat-hook"
+    assert spec_for("0.0.0.0") is None and spec_for(None) is None
+
+
+@pytest.mark.parametrize("version", sorted(SUPPORTED))
+async def test_hook_accepts_every_table_entry(version):
+    transport, _ = backend(version=version)
+    client = NativeClient(settings(), transport=transport)
+    try:
+        assert await client.bind() == "room@chatroom"
+    finally:
+        await client.close()
+
+
+async def test_adding_table_entry_unlocks_version_without_code_change(monkeypatch):
+    import astrbot_plugin_myatri.wechat_versions as table
+
+    extra = dict(SUPPORTED)
+    extra["4.1.99.99"] = table.WeChatVersionSpec(
+        wechat_version="4.1.99.99",
+        client_dir="state/hook/wechat-4.1.99.99",
+        wechatagent_runtime="0.0.0",
+        integration="WeChatAgent-1",
+        backend="wechat-hook",
+    )
+    monkeypatch.setattr(table, "SUPPORTED", extra)
+    transport, _ = backend(version="4.1.99.99")
+    client = NativeClient(settings(), transport=transport)
+    try:
+        assert await client.bind() == "room@chatroom"
+    finally:
+        await client.close()

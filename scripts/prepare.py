@@ -56,6 +56,8 @@ def main():
         "_conf_schema.json",
         "wechatagent_client.py",
         "wechatagent_platform.py",
+        "wechat_versions.py",
+        "wechat-versions.json",
     ]:
         shutil.copyfile(ROOT / "astrbot_plugin_myatri" / name, target / name)
     print(

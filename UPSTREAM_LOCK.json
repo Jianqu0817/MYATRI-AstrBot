@@ -13,6 +13,7 @@
     "installer_sha256": "acc17ad1927d3c65548ca781157b1751d673a8aead47af711dd4e90a5ecf06ce",
     "native_sha256": "1f852ad09bfb8f04542cf4564933ef937326dcca1871a8f2c3cb9edd9b54f6bf",
     "matched_wechat": "4.1.10.27",
+    "supported_wechat_versions": ["4.1.10.27"],
     "vendor_binaries_committed": false
   },
   "MYATRI": {

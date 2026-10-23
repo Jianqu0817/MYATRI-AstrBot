@@ -15,6 +15,18 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT / "var/wechatagent-runtime/workspace"
 sys.path.insert(0, str(ROOT))
+from astrbot_plugin_myatri.wechat_versions import SUPPORTED  # noqa: E402
+
+
+def client_executable():
+    """The matched Weixin.exe for the hook build installed in this runtime."""
+    build = json.loads(
+        (WORKSPACE / "state/hook/native/build.json").read_text(encoding="utf-8-sig")
+    )
+    spec = SUPPORTED.get(build.get("targetVersion"))
+    if spec is None:
+        raise RuntimeError("HOOK_VERSION_MISMATCH")
+    return WORKSPACE / spec.client_dir / "Weixin.exe"
 
 
 def module(name, file):
@@ -54,7 +66,7 @@ def native_health():
         result = json.load(response)
     if (
         result.get("integration") != "WeChatAgent-1"
-        or result.get("version") != "4.1.10.27"
+        or result.get("version") not in SUPPORTED
     ):
         raise RuntimeError("HOOK_VERSION_MISMATCH")
     return result
@@ -88,7 +100,7 @@ def main():
         except setup.SetupError:
             pass
     if not protected_key:
-        executable = WORKSPACE / "state/hook/wechat-4.1.10.27/Weixin.exe"
+        executable = client_executable()
         print(
             "等待你在配套微信中完成登录；若已登录，请在配套微信中退出账号后重新登录。",
             flush=True,

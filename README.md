@@ -42,7 +42,7 @@
 | uv | 可执行 `uv --version`，负责锁定 Python 环境 |
 | Python | **3.12**；项目要求 `>=3.12,<3.13`，可由 uv 安装 |
 | DeepSeek | 真实聊天需要 API Key、账户额度和网络 |
-| 微信接入 | WeChatAgent **0.3.9** 发行组件与配套微信 **4.1.10.27** |
+| 微信接入 | WeChatAgent **0.3.9** 发行组件与配套微信 **4.1.10.27**（支持版本以 `astrbot_plugin_myatri/wechat-versions.json` 兼容表为准） |
 | 电脑执行 | 可选，另需 Node.js、pnpm 与 Harness 安装 |
 
 没有 uv 时，按 [uv 官方文档](https://docs.astral.sh/uv/getting-started/installation/) 在 PowerShell 安装：
@@ -315,7 +315,7 @@ Copy-Item config/harness/executor.example.json config/harness/executor.local.jso
 | --- | --- |
 | `uv` 找不到 | 安装后重开终端，确认 `uv --version` |
 | 缺少 `distribution.json` / `Weixin.exe` | 回到运行包准备步骤；`uv sync` 不会安装微信 |
-| `WeChat version mismatch` | 检查实际 EXE 版本，必须 **4.1.10.27**；目录名不代表版本 |
+| `WeChat version mismatch` | 检查实际 EXE 版本，须在兼容表（`astrbot_plugin_myatri/wechat-versions.json`）内；目录名不代表版本。新微信接入见[微信版本升级指南](docs/微信版本升级指南.md) |
 | `native backend ...30001 is not running` | 托盘退出全部桌面微信，运行 `Open-WeChat.cmd` 完成登录，再开总启动器 |
 | `READER_HTTP_UNAVAILABLE` | 检查器不启动读取端；开总启动器，检查 reader 日志 |
 | `NATIVE_HTTP_UNAVAILABLE` | 检查配套微信、端口、版本与令牌；与模型 Key 无关 |

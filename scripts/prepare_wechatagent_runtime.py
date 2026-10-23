@@ -5,10 +5,14 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT / "var/wechatagent-runtime/workspace"
+
+sys.path.insert(0, str(ROOT))
+from astrbot_plugin_myatri.wechat_versions import SUPPORTED  # noqa: E402
 
 
 def main():
@@ -47,16 +51,20 @@ def main():
     native = WORKSPACE / "state/hook/native"
     build = json.loads((native / "build.json").read_text(encoding="utf-8-sig"))
     dll = native / "version.dll"
+    spec = SUPPORTED.get(build["targetVersion"])
     if (
-        build["targetVersion"] != "4.1.10.27"
+        spec is None
         or hashlib.sha256(dll.read_bytes()).hexdigest() != build["sha256"]
     ):
         raise RuntimeError("Native sender hash/version mismatch")
-    client = WORKSPACE / "state/hook/wechat-4.1.10.27"
+    client = WORKSPACE / spec.client_dir
     destination = client / "version.dll"
-    if destination.exists() and destination.read_bytes() != dll.read_bytes():
-        raise RuntimeError("Another native sender is already installed")
-    shutil.copyfile(dll, destination)
+    if destination.exists():
+        if destination.read_bytes() != dll.read_bytes():
+            raise RuntimeError("Another native sender is already installed")
+        # Already installed; skip rewriting a file the running client may hold open.
+    else:
+        shutil.copyfile(dll, destination)
     shutil.copyfile(
         WORKSPACE / "state/hook/native-token.txt", client / "wechatagent-hook.token"
     )
