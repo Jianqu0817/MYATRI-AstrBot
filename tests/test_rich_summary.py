@@ -8,6 +8,11 @@ from myatri_bridge.short_memory import EvidenceError, ShortMemory
 from myatri_bridge.topics import select_summaries
 
 
+@pytest.fixture
+def memory(tmp_path):
+    return ShortMemory(tmp_path / "short-memory.sqlite3")
+
+
 def interaction():
     return {"text": "甲把加班叫作给月亮打工，仍想下次接着聊这个玩笑。",
         "speaker_id": "a", "subject_id": "", "attribution": "conversation",
@@ -15,10 +20,10 @@ def interaction():
         "source_quotes": [{"message_id": "m1", "quote": "给月亮打工"}]}
 
 
-def test_interaction_keeps_original_quote_and_attribution_in_context():
+def test_interaction_keeps_original_quote_and_attribution_in_context(memory):
     item = interaction()
     messages = [{"message_id": "m1", "sender_id": "a", "text": "我今晚又在给月亮打工。"}]
-    ShortMemory._validate_items({"items": [item]}, messages)
+    memory._validate_items({"items": [item]}, messages)
     result = select_summaries([{"window_end": 100, "created_at": "2026-10-21", "items": [item]}], "月亮打工", "a")
     projected = result["items"][0]
     assert projected["source_quotes"] == item["source_quotes"]
@@ -29,10 +34,10 @@ def test_interaction_keeps_original_quote_and_attribution_in_context():
 
 
 @pytest.mark.parametrize("kind", ["joke", "open_thread", "emotional_cue"])
-def test_temporary_interaction_cannot_be_promoted_to_personal_claim(kind):
+def test_temporary_interaction_cannot_be_promoted_to_personal_claim(kind, memory):
     item = {**interaction(), "interaction_kind": kind, "attribution": "self_report", "subject_id": "a"}
     with pytest.raises(EvidenceError) as error:
-        ShortMemory._validate_items({"items": [item]}, [{"message_id": "m1", "sender_id": "a", "text": "给月亮打工"}])
+        memory._validate_items({"items": [item]}, [{"message_id": "m1", "sender_id": "a", "text": "给月亮打工"}])
     assert error.value.code == "transient_personal_claim"
     assert error.value.field == "interaction_kind"
 
