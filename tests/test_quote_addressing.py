@@ -136,6 +136,16 @@ async def test_ambiguous_human_quote_stays_unverified(bridge, message):
     assert "addressing_bot" not in payload
 
 
+async def test_at_mention_is_recorded_for_the_prompt(bridge, message):
+    result = await bridge.receive(message)
+    assert result["status"] == "prepared"
+    with closing(sqlite3.connect(bridge.path)) as db:
+        row = db.execute("SELECT envelope FROM deliveries WHERE id=?", (message.key,)).fetchone()
+    envelope = json.loads(row[0])
+    assert envelope["mentioned_bot"] is True
+    assert envelope["trigger_kind"] == "explicit"
+
+
 async def test_prompt_renders_addressing_instruction():
     identities = {"owner": {}, "members": [], "summary_attention": {}}
     addressed = render_group_policy(

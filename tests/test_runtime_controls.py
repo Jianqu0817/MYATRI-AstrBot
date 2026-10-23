@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 import pytest
 
 from myatri.persona.state import PersonaState
-from myatri_bridge.bridge import Conflict
+from myatri_bridge.bridge import GROUP_SCOPE_ENTRY, Conflict
 from myatri_bridge.server import create_app
 
 
@@ -37,7 +37,7 @@ async def test_reload_reads_disk_card_and_new_prompt_reaches_next_request(bridge
         current = app.persona.read_state()
         assert current.revision == old.revision + 1
         assert current.payload["entries"]["P00_current_identity"] == entries["P00_current_identity"]
-        assert current.payload["entries"]["P15_group_scope"] == old.payload["entries"]["P15_group_scope"]
+        assert current.payload["entries"]["P15_group_scope"] == GROUP_SCOPE_ENTRY
         assert app.store.get_record(message.key).body_markdown == original.body_markdown
         assert app.store.get_record("persona", revision=old.revision).body_markdown == old.body_markdown
         await bridge.receive(message.model_copy(update={"message_id": "after-reload", "text": "现在叫什么？"}))

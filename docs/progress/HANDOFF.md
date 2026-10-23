@@ -1,8 +1,8 @@
 # MYATRI-AstrBot HANDOFF
 
-## PRIMARY-REPO-SYNC（2026-10-24）
+## NO-AUTO-SYNC（2026-10-24）
 
-myatry 成为三仓主开发仓：可移植改动先在 myatry 实现，经其 `scripts/sync_repos.py` 流入本仓——微信契约文件（`astrbot_plugin_myatri/wechat_versions.py`、`wechat-versions.json`、`docs/微信版本升级指南.md`）字节一致，`src/myatry/**` 应用层按包名改写到 `src/myatri_bridge/**`。**不要直接修改本仓已配对源码**：本地改动会在下次同步被标记 NEEDS REVIEW 或覆盖；确需本仓特有适配的文件见 myatry `docs/sync_manifest.json`。本仓运行数据（var/、upstream/、私有配置）不在同步范围。微信版本检查已改为查兼容表（见 `docs/微信版本升级指南.md`），新微信接入只加表项不改代码；`prepare_wechatagent_runtime.py` 对已一致的 DLL 幂等跳过。核心 wheel 仍冻结 0.2.8，核心改动需显式重建 wheel。
+三仓自动同步（myatry 单向流入）取消：单向同步与并行开发不兼容，当日两次事故均源于此。**三个仓库均保持活跃、独立演进**，本仓完全自主维护；需要借鉴 myatry 改动时按一次性手工移植并注明来源。唯一跨仓约束：微信兼容表 `astrbot_plugin_myatri/wechat-versions.json` 与升级指南须与 myatry 字节一致，myatry 的 `scripts/check_shared.py` 可校验。下方 PRIMARY-REPO-SYNC 条目为该机制存续期间的历史记录。
 
 ## README-DEPLOYMENT-GUIDE（2026-10-23）
 

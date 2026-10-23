@@ -29,14 +29,15 @@ SECOND = "先把东西放下吧，我陪你歇会儿。"
     ("好" * 15, ["好" * 15]),
     (FIRST + SEPARATOR + SECOND, [FIRST, SECOND]),
     (SEPARATOR + FIRST + SEPARATOR + SEPARATOR + SECOND + SEPARATOR, [FIRST, SECOND]),
-    (FIRST + SECOND, [FIRST, SECOND]),
+    (FIRST + SECOND, [FIRST + SECOND]),
+    (FIRST + SECOND + "好。", [FIRST, SECOND, "好。"]),
     ("这句话没有自然断点所以应该保持完整才自然", ["这句话没有自然断点所以应该保持完整才自然"]),
     ("```python\nprint('请保留这段代码完整')\n```", ["```python\nprint('请保留这段代码完整')\n```"]),
     ("短" + SEPARATOR + "句", ["短", "句"]),
     ("我不指挥，听人喊就行\n\n你要指挥我倒也能跟", ["我不指挥，听人喊就行", "你要指挥我倒也能跟"]),
     ("先看结果\n再接着说", ["先看结果", "再接着说"]),
     ('你说“先休息\n明天再聊”\n那就好好睡', ['你说“先休息\n明天再聊”', '那就好好睡']),
-    ('你说“今天有点累。明天再聊吧。”那就早点休息。', ['你说“今天有点累。明天再聊吧。”', '那就早点休息。']),
+    ('你说“今天有点累。明天再聊吧。”那就早点休息。', ['你说“今天有点累。明天再聊吧。”那就早点休息。']),
     ('这个链接是 https://example.com/?q=hello 先保存起来吧。', ['这个链接是 https://example.com/?q=hello 先保存起来吧。']),
 ])
 def test_marker_and_safe_fallback_preserve_complete_meaning(text, expected):

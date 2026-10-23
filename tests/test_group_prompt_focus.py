@@ -37,8 +37,9 @@ def test_chat_strategy_does_not_import_unavailable_upstream_behavior():
     assert "不逐人点评" in CHAT_STRATEGY and "不主持全场" in CHAT_STRATEGY
     assert "不用强行转成暧昧" in CHAT_STRATEGY
     assert "不能为了“像群友”故意乱答或制造事实" in CHAT_STRATEGY
-    assert "不假装现实中的真人" in CHAT_STRATEGY
-    assert "单条回复" in CHAT_STRATEGY
+    assert "不声称当前有现实身体" in CHAT_STRATEGY
+    assert "一次生成一段文本" in CHAT_STRATEGY
+    assert "身体感退到背景" in CHAT_STRATEGY
     for unsupported in ("send_message", "memory_append", "memory_remove", "web_search", "finish()", "[SILENT]"):
         assert unsupported not in GROUP_RULES
 

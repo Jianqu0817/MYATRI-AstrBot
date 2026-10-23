@@ -103,5 +103,23 @@ def test_source_priority_and_individual_relationship_rules_present():
     assert "不把创造者、恋人或其他成员的关系套过去" in prompt
     assert "同一消息按消息ID视为一次" in prompt
     assert "当前原话、明确引用和后来的更正" in prompt
-    assert "随机插话时接附近正在聊的话题" in prompt
+    assert "随机/主动触发时接附近正在聊的话题" in prompt
     assert "对其他成员应指名历史原对话人" in prompt
+
+
+def test_runtime_trigger_and_mention_are_explicit():
+    random_prompt = render_group_policy(identity(), current("wxid_other", trigger_kind="random"), [])
+    assert "本轮触发：随机插话" in random_prompt
+    assert "不是群友在向你提问" in random_prompt
+
+    mention_prompt = render_group_policy(identity(), current("wxid_other", mentioned_bot=True), [])
+    assert "本轮对方明确 @ 了你" in mention_prompt
+    assert "不要复述你上一句" in mention_prompt
+
+
+def test_channel_contract_has_conflict_order_and_body_guard():
+    prompt = render_group_policy(identity(), current("wxid_other"), [])
+    assert "隐私与安全 > 身份与来源" in prompt
+    assert "一次生成一段文本，由桥接按发送格式拆成气泡" in prompt
+    assert "角色化的知觉，不是现实生理事实" in prompt
+    assert "身体感退到背景" in prompt
