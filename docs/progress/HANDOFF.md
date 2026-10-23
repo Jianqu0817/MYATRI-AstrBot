@@ -1,5 +1,9 @@
 # MYATRI-AstrBot HANDOFF
 
+## README-DEPLOYMENT-GUIDE（2026-10-23）
+
+按用户要求重写根 README 为当前部署/使用入口：依赖、首次安装、凭据、启动器与库边界、界面端口、搜索与 Harness 身份安装、报告回传、费用/恢复、排错和备份更新。AstrBot 明确微信发行组件不随 Git 提供，prepare 不负责冷安装，并记录匹配版本恢复与同库终端互斥；核心明确两启动器不同库及完整目录冷备份。历史文档保留其日期含义。仅改文档：两仓相对链接与代码围栏通过，命令帮助入口通过，配置/脚本核对与 diff 通过；核心在隔离 root/project、显式角色卡下完成单轮 offline 冒烟。未启动生产、调用付费模型或发送微信。
+
 ## PORTABLE-FEEDBACK-SYNC（2026-10-22）
 
 用户授权已将可移植改进同步核心GitHub b3fc03b，源代码取AstrBot19a320d；来源Git blob哈希在核心docs/harness_feedback_port_source.json。核心回传续接器按_application_location使用原私聊库，不是桥版root/scope；保留原CLI身份/PrivateRecall/provider账本。110项定向63.50秒及Ruff/diff/wheel通过，不跑全量，无生产重启/付费/群发。群唤醒和本仓同库模式切换入口未迁入；旧“仅AstrBot完成”的移植文档以最新顶部说明为准。桥源码无需为核心发布而换vendor。
